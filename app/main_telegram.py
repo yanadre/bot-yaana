@@ -33,7 +33,7 @@ async def on_shutdown(app: Application):
 async def start(update, context):
     user_id = update.effective_user.id
     
-    if user_id==settings.AUTHORIZED_ID:
+    if user_id!=settings.AUTHORIZED_ID:
         await update.message.reply_text("🚫 Access Denied. You are not authorized.")
         return # Stop processing the command
 
