@@ -1,0 +1,25 @@
+services:
+  qdrant:
+    image: qdrant/qdrant
+    container_name: qdrant
+    ports:
+      - "6333:6333"          # Qdrant default REST API port
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  api:
+    platform: linux/arm64   
+
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: chatbot_api
+    ports:
+      - "8000:8000"
+    depends_on:
+      - qdrant
+    env_file:
+      - .env
+
+volumes:
+  qdrant_data:
