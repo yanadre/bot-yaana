@@ -2,6 +2,10 @@ from typing import List
 import random
 from google import genai
 from langchain.embeddings.base import Embeddings
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 
 class StubEmbeddingModel(Embeddings):
@@ -9,10 +13,12 @@ class StubEmbeddingModel(Embeddings):
         self.vector_size = vector_size
 
     def embed_query(self, text: str) -> List[float]:
+        logger.info(f"[EMBEDDING] StubEmbeddingModel.embed_query called with text: {text[:50]!r}")
         """Return a dummy vector for testing"""
         return [random.random() for _ in range(self.vector_size)]
 
     def embed_documents(self, docs: List[str]) -> List[List[float]]:
+        logger.info(f"[EMBEDDING] StubEmbeddingModel.embed_documents called with {len(docs)} docs")
         return [self.embed_query(t) for t in docs]
     
 
@@ -24,20 +30,26 @@ class GeminiEmbeddingModel(Embeddings):
         self.embedding_model = embedding_model
 
     def embed_documents(self, docs):
+        logger.info(f"[EMBEDDING] GeminiEmbeddingModel.embed_documents called with {len(docs)} docs")
         try:
             contents = [{"parts": [{"text": doc}]} for doc in docs]
             result = self.client.models.embed_content(model=self.embedding_model, contents=contents)
+            logger.info(f"[EMBEDDING] GeminiEmbeddingModel.embed_documents result: {len(result.embeddings)} embeddings")
             return [e.values for e in result.embeddings]
         except Exception as e:
+            logger.error(f"[EMBEDDING] GeminiEmbeddingModel.embed_documents error: {e}", exc_info=True)
             raise Exception(f"Embedding request failed: {e}") from e
         
     
     def embed_query(self, text):
+        logger.info(f"[EMBEDDING] GeminiEmbeddingModel.embed_query called with text: {text[:50]!r}")
         try:
             contents = {"parts": [{"text": text}]}
             result = self.client.models.embed_content(model=self.embedding_model, contents=contents)
+            logger.info(f"[EMBEDDING] GeminiEmbeddingModel.embed_query result: {len(result.embeddings[0].values)} values")
             return result.embeddings[0].values
         except Exception as e:
+            logger.error(f"[EMBEDDING] GeminiEmbeddingModel.embed_query error: {e}", exc_info=True)
             raise Exception(f"Embedding request failed: {e}") from e
 
         
