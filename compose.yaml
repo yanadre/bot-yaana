@@ -20,6 +20,8 @@ services:
       - qdrant
     env_file:
       - .env
+    volumes:
+      - ./logs:/app/logs
 
 volumes:
   qdrant_data:
