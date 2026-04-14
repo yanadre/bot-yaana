@@ -121,6 +121,30 @@ async def handle_search_qdrant(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         logger.error(f"Exception in handle_search_qdrant: {e}", exc_info=True)  # [ERROR LOG]
 
+def format_agent_response(response):
+    """
+    Formats the agent/tool response for user-friendly Telegram output.
+    Handles search (list of dicts), string, None, or empty cases for all tool actions.
+    """
+    if response is None:
+        return "⚠️ No response from the agent. Please try again."
+    if isinstance(response, str):
+        text = response.strip()
+        if not text:
+            return "⚠️ Operation completed, but no details were returned."
+        return text
+    if isinstance(response, list):
+        # For search: list of dicts with 'text' fields
+        texts = [str(x.get("text", "")) for x in response if x.get("text")]
+        if texts:
+            return "\n".join(texts)
+        return "ℹ️ No results found."
+    # For dict or other types
+    text = str(response).strip()
+    if not text:
+        return "⚠️ Operation completed, but no details were returned."
+    return text
+
 async def handle_agent_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
@@ -136,7 +160,6 @@ async def handle_agent_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             }
         }    
         agent = context.bot_data["agent"]
-        # logger.info(f"[handle_agent_chat] Agent tools available: {getattr(agent, 'tools', 'N/A')}")
         logger.info(f"[handle_agent_chat] Agent dir: {dir(agent)}")
         logger.info(f"[handle_agent_chat] Agent tool_map: {getattr(agent, 'tool_map', 'N/A')}")
         logger.debug(f"[handle_agent_chat] Invoking agent with config: {config} and message: {update.message.text}")
@@ -144,20 +167,75 @@ async def handle_agent_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = agent.invoke({"messages": [("user", update.message.text)]}, config)
         logger.info(f"[handle_agent_chat] LLM invocation result: {result}")
         logger.debug(f"[handle_agent_chat] Agent result: {result}")
-        if hasattr(result, "__interrupt__") and result.__interrupt__:
+        # --- DEBUG: Print the full result structure for HITL troubleshooting ---
+        logger.info(f"[handle_agent_chat] DEBUG: Full agent result type={type(result)}, dir={dir(result)}, as_dict={getattr(result, '__dict__', str(result))}")
+        # --- END DEBUG ---
+        # Robust interrupt detection: check for attribute, dict key, or list
+        interrupt = False
+        if hasattr(result, "__interrupt__") and getattr(result, "__interrupt__", None):
+            interrupt = True
+        elif isinstance(result, dict) and "__interrupt__" in result and result["__interrupt__"]:
+            interrupt = True
+        # Optionally, check for other forms if needed
+        if interrupt:
             logger.info("[handle_agent_chat] Agent action requires approval (HITL interrupt). Sending approval UI.")
-            keyboard = [
-                [InlineKeyboardButton("✅ Approve", callback_data="approve"),
-                 InlineKeyboardButton("🔄 Retry", callback_data="reject_and_retry")],
-                [InlineKeyboardButton("📝 Edit", callback_data="edit"),
-                 InlineKeyboardButton("❌ Abort", callback_data="abort")]
-            ]
-            await update.message.reply_text("⚠️ Action requires approval:", reply_markup=InlineKeyboardMarkup(keyboard))
-            logger.debug("[handle_agent_chat] Approval UI sent to user.")
+            action_requests = None
+            interrupt_obj = None
+            if hasattr(result, "__interrupt__"):
+                interrupt_obj = getattr(result, "__interrupt__", [])[0]
+            elif isinstance(result, dict):
+                interrupt_obj = result["__interrupt__"][0]
+            # Interrupt may be a custom class, so use vars() or __dict__
+            if interrupt_obj is not None:
+                # Try dict-style first
+                if isinstance(interrupt_obj, dict):
+                    action_requests = interrupt_obj.get("value", {}).get("action_requests", [])
+                else:
+                    # Try attribute or __dict__
+                    value = getattr(interrupt_obj, "value", None)
+                    if value is None and hasattr(interrupt_obj, "__dict__"):
+                        value = interrupt_obj.__dict__.get("value", None)
+                    if value and isinstance(value, dict):
+                        action_requests = value.get("action_requests", [])
+            if action_requests:
+                action_name = action_requests[0].get("name", "")
+                # Compose a detailed approval message with document content and metadata
+                if action_requests:
+                    action_name = action_requests[0].get("name", "")
+                    args = action_requests[0].get("args", {})
+                    doc_text = args.get("text") or args.get("doc") or args.get("content")
+                    metadata = args.get("metadata")
+                    details = []
+                    if doc_text:
+                        details.append(f"<b>Content:</b> {doc_text}")
+                    if metadata:
+                        details.append(f"<b>Metadata:</b> {metadata}")
+                    details_str = "\n".join(details)
+                    if action_name == "add_to_vault":
+                        confirm_text = f"📝 Are you sure you want to add this item to your vault?\n{details_str}"
+                    elif action_name == "delete_from_vault":
+                        confirm_text = f"⚠️ Are you sure you want to delete the selected item(s) from your vault?\n{details_str}"
+                    else:
+                        confirm_text = f"⚠️ Action requires approval:\n{details_str}"
+                else:
+                    confirm_text = "⚠️ Action requires approval:"
+                keyboard = [
+                    [InlineKeyboardButton("✅ Approve", callback_data="approve"),
+                     InlineKeyboardButton("🔄 Retry", callback_data="reject_and_retry")],
+                    [InlineKeyboardButton("📝 Edit", callback_data="edit"),
+                     InlineKeyboardButton("❌ Abort", callback_data="abort")]
+                ]
+                await update.message.reply_text(confirm_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+                logger.debug("[handle_agent_chat] Approval UI sent to user.")
+                return  # Prevent sending a normal response when approval is required
         else:
             logger.info("[handle_agent_chat] Agent completed without HITL. Sending response to user.")
-            await update.message.reply_text(result["messages"][-1].content)
-            logger.debug(f"[handle_agent_chat] Sent message: {result['messages'][-1].content}")
+            content = result["messages"][-1].content
+            reply_text = format_agent_response(content)
+            if not reply_text.strip():
+                reply_text = "⚠️ Operation completed, but no details were returned."
+            await update.message.reply_text(reply_text)
+            logger.debug(f"[handle_agent_chat] Sent message: {reply_text}")
     except Exception as e:
         logger.error(f"[handle_agent_chat] Exception: {e}", exc_info=True)  # [ERROR LOG]
 
@@ -168,6 +246,11 @@ async def handle_callback(update, context):
     logger.info(f"[handle_callback] Callback query received from user_id={user_id}, chat_id={chat_id}: {query.data}")
     try:
         await query.answer()
+        # Handle abort directly, do not call agent.invoke
+        if query.data == "abort":
+            await query.edit_message_text("❌ Action aborted. No changes were made.")
+            logger.info("[handle_callback] User aborted the action. Notified user and skipped agent.invoke.")
+            return
         config = {
             "configurable": {
                 "thread_id": str(chat_id), 
@@ -181,8 +264,36 @@ async def handle_callback(update, context):
             config=config
         )
         logger.debug(f"[handle_callback] Agent final result after callback: {final_result}")
-        await query.edit_message_text(final_result["messages"][-1].content)
-        logger.info(f"[handle_callback] Sent final agent message to user: {final_result['messages'][-1].content}")
+        # After approval, send confirmation for add/delete
+        if query.data == "approve":
+            # Try to infer action type from final_result
+            last_tool_call = None
+            for msg in final_result["messages"]:
+                if hasattr(msg, "tool_calls") and msg.tool_calls:
+                    last_tool_call = msg.tool_calls[-1]
+            if last_tool_call:
+                action_name = last_tool_call.get("name", "")
+                if action_name == "add_to_vault":
+                    confirmation = "✅ Item successfully added to your vault."
+                elif action_name == "delete_from_vault":
+                    confirmation = "🗑️ Item(s) successfully deleted from your vault."
+                else:
+                    confirmation = format_agent_response(final_result["messages"][-1].content)
+            else:
+                confirmation = format_agent_response(final_result["messages"][-1].content)
+            # Only edit if the message content is different
+            if query.message.text != confirmation:
+                await query.edit_message_text(confirmation)
+                logger.info(f"[handle_callback] Sent final agent message to user: {confirmation}")
+            else:
+                logger.info(f"[handle_callback] Skipped edit_message_text: content unchanged.")
+        else:
+            new_text = format_agent_response(final_result["messages"][-1].content)
+            if query.message.text != new_text:
+                await query.edit_message_text(new_text)
+                logger.info(f"[handle_callback] Sent final agent message to user: {new_text}")
+            else:
+                logger.info(f"[handle_callback] Skipped edit_message_text: content unchanged.")
     except Exception as e:
         logger.error(f"[handle_callback] Exception: {e}", exc_info=True)  # [ERROR LOG]
 
