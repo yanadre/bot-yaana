@@ -46,7 +46,19 @@ def search_vault(query: str, filter_dict: Optional[Dict[str, Any]] = None, confi
     logger.info(f"[TOOL] search_vault result: {result}")
     return result
 
-@tool
+@tool(
+    description=(
+        "Add a document to the vector store. "
+        "Always extract both the main content and all relevant metadata fields from the user's input. "
+        "The metadata schema is dynamic: infer fields such as item_type, update_date, etc., from the query context. "
+        "Use 'text' for the main content and 'metadata' for all inferred metadata fields. "
+        "Examples: "
+        "- For 'Add the book I, Robot', set metadata={'item_type': 'book'} "
+        "- For 'Add a task to wash dishes', set metadata={'item_type': 'task'} "
+        "If unsure, attempt to infer likely metadata fields. "
+        "This tool should be used for any user request to add information to their personal database."
+    )
+)
 def add_to_vault(text: str, metadata: Dict[str, Any], config: RunnableConfig):
     """SENSITIVE: Adds a document to Qdrant. Requires approval."""
     logger.info(f"[TOOL] add_to_vault called with text={text[:50]!r}, metadata={metadata!r}, config={config!r}")
@@ -59,7 +71,19 @@ def add_to_vault(text: str, metadata: Dict[str, Any], config: RunnableConfig):
         logger.error(f"[TOOL] add_to_vault error: {e}", exc_info=True)
         return f"Error adding document: {e}"
 
-@tool
+@tool(
+    description=(
+        "Delete documents from the vector store. "
+        "Always extract all relevant metadata fields from the user's input to construct the filters. "
+        "The metadata schema is dynamic: infer fields such as item_type, update_date, etc., from the query context. "
+        "Use 'filters' for all inferred metadata fields to identify which documents to delete. "
+        "Examples: "
+        "- For 'Delete all books', set filters={'item_type': 'book'} "
+        "- For 'Remove tasks from today', set filters={'item_type': 'task', 'update_date': 'today'} "
+        "If unsure, attempt to infer likely metadata fields. "
+        "This tool should be used for any user request to delete information from their personal database."
+    )
+)
 def delete_from_vault(filters: Dict[str, Any], config: RunnableConfig):
     """SENSITIVE: Deletes documents from Qdrant. Requires approval."""
     logger.info(f"[TOOL] delete_from_vault called with filters={filters!r}, config={config!r}")
@@ -72,7 +96,18 @@ def delete_from_vault(filters: Dict[str, Any], config: RunnableConfig):
         logger.error(f"[TOOL] delete_from_vault error: {e}", exc_info=True)
         return f"Error deleting documents: {e}"
 
-@tool
+@tool(
+    description=(
+        "Update metadata for documents in the vector store. "
+        "Always extract all relevant metadata fields from the user's input to construct the filters and new metadata. "
+        "The metadata schema is dynamic: infer fields such as item_type, update_date, etc., from the query context. "
+        "Use 'filters' for all inferred metadata fields to identify which documents to update, and 'new_metadata' for the new values. "
+        "Examples: "
+        "- For 'Change the date of my homework task to tomorrow', set filters={'item_type': 'task', 'text': 'homework'}, new_metadata={'update_date': 'tomorrow'} "
+        "If unsure, attempt to infer likely metadata fields. "
+        "This tool should be used for any user request to update information in their personal database."
+    )
+)
 def update_vault_metadata(filters: Dict[str, Any], new_metadata: Dict[str, Any], config: RunnableConfig):
     """
     Updates metadata for documents matching the filters.
