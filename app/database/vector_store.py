@@ -4,6 +4,8 @@ from qdrant_client import QdrantClient, models
 from qdrant_client.http import models as rest_models
 from langchain_qdrant import QdrantVectorStore
 import sys
+from datetime import datetime
+import uuid
 
 # Use a named logger to ensure all logs go to both file and stream handlers set up in main_telegram.py
 logger = logging.getLogger("bot")
@@ -76,15 +78,29 @@ class QdrantStore:
     async def add(self, texts: list[str], metadatas: list[dict]):
         """
         Insert documents into the collection.
+        Adds versioning and timestamps to each document.
         texts: list of text documents
         metadatas: list of dicts with info about each vector (text, source, etc.)
         """
         logger.info(f"[QDRANT] add called with texts={texts}, metadatas={metadatas}")
         if not self.vector_store:
             raise ValueError("Vector store not initialized")
+        now = datetime.utcnow().isoformat()
+        new_texts = []
+        new_metadatas = []
+        for text, metadata in zip(texts, metadatas):
+            doc_id = metadata.get("id", str(uuid.uuid4()))
+            metadata = metadata.copy()
+            metadata["id"] = doc_id
+            metadata["version"] = "new"
+            metadata["creation_datetime"] = now
+            metadata["update_datetime"] = now
+            new_texts.append(text)
+            new_metadatas.append(metadata)
+            logger.debug(f"[QDRANT] add: Added versioning to doc_id={doc_id}, creation_datetime={now}")
         # LangChain's aadd_texts is async, but internally calls sync client, so await is fine
-        await self.vector_store.aadd_texts(texts=texts, metadatas=metadatas)
-        logger.info(f"[QDRANT] add completed for {len(texts)} texts.")
+        await self.vector_store.aadd_texts(texts=new_texts, metadatas=new_metadatas)
+        logger.info(f"[QDRANT] add completed for {len(new_texts)} texts with versioning and timestamps.")
 
     def _build_filter(self, filter_dict: dict = None) -> models.Filter | None:
         """
@@ -103,9 +119,10 @@ class QdrantStore:
             )
         return models.Filter(must=conditions)
 
-    async def search(self, query: str, filter_dict: dict = None, top_k: int = 5, score_threshold: float = 0.7):
+    async def search(self, query: str, filter_dict: dict = None, top_k: int = 5, score_threshold: float = 0.2):
         """
         Semantic search or list documents in the collection.
+        Always filters for version='new' unless explicitly overridden.
         query: search string (if empty, lists docs)
         filter_dict: metadata filter
         top_k: number of results
@@ -114,6 +131,11 @@ class QdrantStore:
         logger.info(f"[QDRANT] search called with query='{query}', filter_dict={filter_dict}, top_k={top_k}, score_threshold={score_threshold}")
         if not self.vector_store:
             raise ValueError("Vector store not initialized")
+        # Always filter for version='new' unless explicitly overridden
+        if filter_dict is None:
+            filter_dict = {}
+        if "version" not in filter_dict:
+            filter_dict["version"] = "new"
         qdrant_filter = self._build_filter(filter_dict)
         if not query or query.strip() == "":
             points, _ = self.sync_client.scroll(
@@ -146,22 +168,55 @@ class QdrantStore:
         logger.info(f"[QDRANT] search result: {formatted}")
         return formatted
 
-    async def update_metadata(self, filter_dict: dict, new_metadata: dict):
+    async def update_document(self, filter_dict: dict, new_text: str = None, new_metadata: dict = None):
+        """
+        Versioned update: mark old doc as 'old', insert new doc as 'new' with updated fields.
+        filter_dict: metadata filter to find the document to update
+        new_text: new text content (if provided)
+        new_metadata: new metadata fields to update (merged with existing)
+        """
+        logger.info(f"[QDRANT] update_document called with filter_dict={filter_dict}, new_text={new_text}, new_metadata={new_metadata}")
         if not self.sync_client:
             raise ValueError("Sync client not initialized")
-            
+        # Always filter for version='new'
+        filter_dict = filter_dict.copy()
+        filter_dict["version"] = "new"
         qdrant_filter = self._build_filter(filter_dict)
-        
-        # IMPORTANT: LangChain expects metadata to be nested under 'metadata'
-        # We wrap the update to maintain LangChain compatibility
-        wrapped_metadata = {"metadata": new_metadata}
-        
+        points, _ = self.sync_client.scroll(
+            collection_name=self.collection_name,
+            scroll_filter=qdrant_filter,
+            limit=1
+        )
+        if not points:
+            logger.error(f"[QDRANT] update_document: No matching document found for filter {filter_dict}")
+            raise Exception("Document to update not found.")
+        point = points[0]
+        old_metadata = point.payload.get("metadata", {}).copy()
+        old_text = point.payload.get("page_content", "")
+        doc_id = old_metadata.get("id", str(uuid.uuid4()))
+        creation_datetime = old_metadata.get("creation_datetime", datetime.utcnow().isoformat())
+
+        # Mark current as 'old'
         self.sync_client.set_payload(
             collection_name=self.collection_name,
-            payload=wrapped_metadata,
-            points=qdrant_filter
+            payload={"metadata": {**old_metadata, "version": "old", "update_datetime": datetime.utcnow().isoformat()}},
+            points=[point.id]
         )
-        logger.info(f"Updated metadata for docs matching: {filter_dict}")
+        logger.info(f"[QDRANT] update_document: Marked old doc id={point.id} as 'old'.")
+
+        # Insert new version
+        now = datetime.utcnow().isoformat()
+        new_doc_metadata = old_metadata.copy()
+        if new_metadata:
+            new_doc_metadata.update(new_metadata)
+        new_doc_metadata["version"] = "new"
+        new_doc_metadata["id"] = doc_id
+        new_doc_metadata["creation_datetime"] = creation_datetime
+        new_doc_metadata["update_datetime"] = now
+        new_doc_text = new_text if new_text is not None else old_text
+
+        await self.vector_store.aadd_texts(texts=[new_doc_text], metadatas=[new_doc_metadata])
+        logger.info(f"[QDRANT] update_document: Inserted new version for doc_id={doc_id}, creation_datetime={creation_datetime}, update_datetime={now}")
 
 
     async def delete(self, filter_dict: dict):
