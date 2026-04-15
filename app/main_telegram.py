@@ -60,9 +60,9 @@ async def on_startup(app: Application):
     
     hitl_middleware = HumanInTheLoopMiddleware(
         interrupt_on={
-                "add_to_vault": {"allowed_decisions": ["approve", "reject_and_retry", "abort", "edit"]},
-                "delete_from_vault": {"allowed_decisions": ["approve", "reject_and_retry", "abort", "edit"]},
-                "update_vault_metadata": {"allowed_decisions": ["approve", "reject_and_retry", "abort", "edit"]},
+                "add_to_vault": {"allowed_decisions": ["approve", "reject", "edit"]},
+                "delete_from_vault": {"allowed_decisions": ["approve", "reject", "edit"]},
+                "update_vault_metadata": {"allowed_decisions": ["approve", "reject", "edit"]},
                 "search_vault": False  # Search remains automatic
                 }
     )
@@ -153,6 +153,78 @@ async def handle_agent_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id != settings.AUTHORIZED_ID:
             logger.warning(f"[handle_agent_chat] Unauthorized user_id={user_id}, ignoring message.")
             return
+
+        # ── AWAITING UPDATE CHANGES ──────────────────────────────────────────
+        # User has confirmed the document and is now describing the changes.
+        # Apply the update directly — do NOT re-invoke the agent (that causes the loop).
+        if context.user_data.get("awaiting_update_changes"):
+            context.user_data.pop("awaiting_update_changes")
+            pending_doc = context.user_data.pop("pending_update_doc", None)
+            pending_filters = context.user_data.pop("pending_update_filters", None)
+            logger.info(f"[handle_agent_chat] Applying update. filters={pending_filters}, changes='{update.message.text}'")
+
+            if not pending_filters:
+                await update.message.reply_text("⚠️ Lost track of which document to update. Please start over.")
+                return
+
+            vs = context.bot_data["vs"]
+            # Use the LLM to parse the user's change description into a metadata dict
+            try:
+                from langchain_google_genai import ChatGoogleGenerativeAI
+                parse_llm = ChatGoogleGenerativeAI(model=settings.LLM_MODEL, temperature=0)
+                current_meta = pending_doc.get("metadata", {}) if pending_doc else {}
+                current_text = pending_doc.get("text", "") if pending_doc else ""
+                parse_prompt = (
+                    f"The user wants to update a document.\n"
+                    f"Current document text: {current_text}\n"
+                    f"Current metadata: {current_meta}\n"
+                    f"User's requested changes: \"{update.message.text}\"\n\n"
+                    f"Return ONLY a valid JSON object with the metadata fields that should be changed/added. "
+                    f"If the user wants to change the text/content itself, include a key \"__text__\" with the new text. "
+                    f"Example: {{\"status\": \"watched\", \"rating\": 9}}\n"
+                    f"Do not include fields that are not being changed. Do not include any explanation."
+                )
+                parse_response = parse_llm.invoke(parse_prompt)
+                import json, re
+                raw = parse_response.content
+                # Gemini may return content as a list of parts or a plain string
+                if isinstance(raw, list):
+                    raw = " ".join(
+                        part.get("text", "") if isinstance(part, dict) else str(part)
+                        for part in raw
+                    )
+                raw = raw.strip()
+                # Extract JSON from the response
+                json_match = re.search(r'\{.*\}', raw, re.DOTALL)
+                new_fields = json.loads(json_match.group()) if json_match else {}
+                logger.info(f"[handle_agent_chat] Parsed update fields: {new_fields}")
+            except Exception as e:
+                logger.error(f"[handle_agent_chat] Failed to parse update fields: {e}", exc_info=True)
+                await update.message.reply_text("⚠️ Could not parse the requested changes. Please try again.")
+                return
+
+            new_text = new_fields.pop("__text__", None)
+            new_metadata = new_fields  # remaining keys are metadata changes
+
+            try:
+                await vs.update_document(filter_dict=pending_filters, new_text=new_text, new_metadata=new_metadata)
+                logger.info(f"[handle_agent_chat] Update applied. filters={pending_filters}, new_metadata={new_metadata}, new_text={new_text}")
+                summary_lines = [f"  • {k}: {v}" for k, v in new_metadata.items()]
+                if new_text:
+                    summary_lines.insert(0, f"  • content: {new_text}")
+                summary = "\n".join(summary_lines) or "  (no changes detected)"
+                await update.message.reply_text(f"✅ Document updated successfully!\n\n<b>Changes applied:</b>\n{summary}", parse_mode="HTML")
+            except Exception as e:
+                logger.error(f"[handle_agent_chat] Update failed: {e}", exc_info=True)
+                await update.message.reply_text(f"❌ Update failed: {e}")
+            return
+
+        # ── REFINING UPDATE SEARCH ───────────────────────────────────────────
+        # User is clarifying which document to search for — normal agent flow.
+        if context.user_data.get("refining_update_search"):
+            logger.info("[handle_agent_chat] User refining update document search.")
+            context.user_data.pop("refining_update_search")
+            # Fall through to normal agent invoke below
         config = {
             "configurable": {
                 "thread_id": str(chat_id),
@@ -199,35 +271,99 @@ async def handle_agent_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         action_requests = value.get("action_requests", [])
             if action_requests:
                 action_name = action_requests[0].get("name", "")
-                # Compose a detailed approval message with document content and metadata
-                if action_requests:
-                    action_name = action_requests[0].get("name", "")
-                    args = action_requests[0].get("args", {})
-                    doc_text = args.get("text") or args.get("doc") or args.get("content")
-                    metadata = args.get("metadata")
+                args = action_requests[0].get("args", {})
+
+                if action_name == "add_to_vault":
+                    doc_text = args.get("text", "")
+                    metadata = args.get("metadata", {})
                     details = []
                     if doc_text:
                         details.append(f"<b>Content:</b> {doc_text}")
                     if metadata:
-                        details.append(f"<b>Metadata:</b> {metadata}")
+                        meta_lines = "\n".join(f"  • {k}: {v}" for k, v in metadata.items())
+                        details.append(f"<b>Metadata:</b>\n{meta_lines}")
                     details_str = "\n".join(details)
-                    if action_name == "add_to_vault":
-                        confirm_text = f"📝 Are you sure you want to add this item to your vault?\n{details_str}"
-                    elif action_name == "delete_from_vault":
-                        confirm_text = f"⚠️ Are you sure you want to delete the selected item(s) from your vault?\n{details_str}"
+                    confirm_text = f"📝 Are you sure you want to add this item to your vault?\n\n{details_str}"
+                    keyboard = [
+                        [InlineKeyboardButton("✅ Approve", callback_data="approve"),
+                         InlineKeyboardButton("🔄 Retry", callback_data="reject_and_retry")],
+                        [InlineKeyboardButton("📝 Edit", callback_data="edit"),
+                         InlineKeyboardButton("❌ Abort", callback_data="abort")]
+                    ]
+
+                elif action_name == "delete_from_vault":
+                    filters = args.get("filters", {})
+                    filter_lines = "\n".join(f"  • {k}: {v}" for k, v in filters.items())
+                    confirm_text = f"⚠️ Are you sure you want to delete item(s) matching:\n\n{filter_lines}"
+                    keyboard = [
+                        [InlineKeyboardButton("✅ Approve", callback_data="approve"),
+                         InlineKeyboardButton("🔄 Retry", callback_data="reject_and_retry")],
+                        [InlineKeyboardButton("📝 Edit", callback_data="edit"),
+                         InlineKeyboardButton("❌ Abort", callback_data="abort")]
+                    ]
+
+                elif action_name == "update_vault_metadata":
+                    filters = args.get("filters", {})
+                    # Look up the actual document to display its content and metadata
+                    vs = context.bot_data.get("vs")
+                    doc_display = ""
+                    if vs and filters:
+                        try:
+                            doc_id = filters.get("id") or filters.get("_id")
+                            if doc_id:
+                                results = await vs.search(query="", filter_dict={"id": doc_id}, top_k=1)
+                            else:
+                                results = await vs.search(
+                                    query=" ".join(str(v) for v in filters.values()),
+                                    filter_dict=filters, top_k=1
+                                )
+                            if results:
+                                found_doc = results[0]
+                                doc_text = found_doc.get("text", "")
+                                meta = {k: v for k, v in found_doc.get("metadata", {}).items()
+                                        if k not in ("_id", "_collection_name", "version",
+                                                     "creation_datetime", "update_datetime", "id")}
+                                meta_lines = "\n".join(f"  • {k}: {v}" for k, v in meta.items())
+                                doc_display = f"<b>📄 Content:</b> {doc_text}\n<b>🏷 Metadata:</b>\n{meta_lines}"
+                                # Store for use after user clicks Confirm
+                                context.user_data["pending_update_doc"] = found_doc
+                                context.user_data["pending_update_filters"] = filters
+                                logger.info(f"[handle_agent_chat] Update preview fetched: {found_doc}")
+                            else:
+                                doc_display = f"<b>Filters used:</b> {filters}\n(Document not found with these filters)"
+                        except Exception as e:
+                            logger.warning(f"[handle_agent_chat] Could not fetch document for update preview: {e}")
+                            doc_display = f"<b>Filters:</b> {filters}"
                     else:
-                        confirm_text = f"⚠️ Action requires approval:\n{details_str}"
+                        doc_display = f"<b>Filters:</b> {filters}"
+
+                    confirm_text = f"🔍 Is this the document you want to update?\n\n{doc_display}"
+                    keyboard = [
+                        [InlineKeyboardButton("✅ Confirm", callback_data="confirm_update"),
+                         InlineKeyboardButton("🔍 Another Document", callback_data="refine_update")],
+                        [InlineKeyboardButton("❌ Abort", callback_data="abort_update")]
+                    ]
+
                 else:
-                    confirm_text = "⚠️ Action requires approval:"
+                    details_str = str(args)
+                    confirm_text = f"⚠️ Action requires approval:\n\n{details_str}"
+                    keyboard = [
+                        [InlineKeyboardButton("✅ Approve", callback_data="approve"),
+                         InlineKeyboardButton("🔄 Retry", callback_data="reject_and_retry")],
+                        [InlineKeyboardButton("📝 Edit", callback_data="edit"),
+                         InlineKeyboardButton("❌ Abort", callback_data="abort")]
+                    ]
+            else:
+                confirm_text = "⚠️ Action requires approval."
                 keyboard = [
                     [InlineKeyboardButton("✅ Approve", callback_data="approve"),
                      InlineKeyboardButton("🔄 Retry", callback_data="reject_and_retry")],
                     [InlineKeyboardButton("📝 Edit", callback_data="edit"),
                      InlineKeyboardButton("❌ Abort", callback_data="abort")]
                 ]
-                await update.message.reply_text(confirm_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
-                logger.debug("[handle_agent_chat] Approval UI sent to user.")
-                return  # Prevent sending a normal response when approval is required
+            await update.message.reply_text(confirm_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+            logger.debug("[handle_agent_chat] Approval UI sent to user.")
+            return  # Prevent sending a normal response when approval is required
         else:
             logger.info("[handle_agent_chat] Agent completed without HITL. Sending response to user.")
             content = result["messages"][-1].content
@@ -250,6 +386,52 @@ async def handle_callback(update, context):
         if query.data == "abort":
             await query.edit_message_text("❌ Action aborted. No changes were made.")
             logger.info("[handle_callback] User aborted the action. Notified user and skipped agent.invoke.")
+            return
+        # Handle update flow callbacks
+        if query.data == "abort_update":
+            # Resume the interrupted thread cleanly before aborting
+            config = {
+                "configurable": {
+                    "thread_id": str(chat_id),
+                    "vs": context.bot_data["vs"]
+                }
+            }
+            try:
+                context.bot_data["agent"].invoke(
+                    Command(resume={"decisions": [{"type": "reject", "message": "User aborted the update."}]}),
+                    config=config
+                )
+            except Exception as e:
+                logger.warning(f"[handle_callback] abort_update: agent resume failed (non-fatal): {e}")
+            await query.edit_message_text("❌ Update cancelled. No changes were made.")
+            logger.info("[handle_callback] User aborted the update. Notified user.")
+            context.user_data.pop("pending_update_doc", None)
+            context.user_data.pop("pending_update_filters", None)
+            return
+        if query.data == "confirm_update":
+            # Resume the agent with a reject decision so the LangGraph thread finishes
+            # cleanly (we will apply the update ourselves after the user describes changes).
+            config = {
+                "configurable": {
+                    "thread_id": str(chat_id),
+                    "vs": context.bot_data["vs"]
+                }
+            }
+            try:
+                context.bot_data["agent"].invoke(
+                    Command(resume={"decisions": [{"type": "reject", "message": "User will describe changes separately."}]}),
+                    config=config
+                )
+            except Exception as e:
+                logger.warning(f"[handle_callback] confirm_update: agent resume failed (non-fatal): {e}")
+            await query.edit_message_text("✏️ Please describe what changes you'd like to make to this document.")
+            logger.info("[handle_callback] User confirmed document for update. Agent thread cleared. Waiting for change description.")
+            context.user_data["awaiting_update_changes"] = True
+            return
+        if query.data == "refine_update":
+            await query.edit_message_text("🔍 Please provide more details about which document you need:\n- Use natural language\n- Or specify metadata fields (e.g., 'task with status=done')")
+            logger.info("[handle_callback] User requested document refinement. Waiting for clarification.")
+            context.user_data["refining_update_search"] = True
             return
         config = {
             "configurable": {
