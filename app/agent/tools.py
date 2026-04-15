@@ -100,24 +100,27 @@ def delete_from_vault(filters: Dict[str, Any], config: RunnableConfig):
     description=(
         "Update metadata for documents in the vector store. "
         "Always extract all relevant metadata fields from the user's input to construct the filters and new metadata. "
-        "The metadata schema is dynamic: infer fields such as item_type, update_date, etc., from the query context. "
-        "Use 'filters' for all inferred metadata fields to identify which documents to update, and 'new_metadata' for the new values. "
+        "The metadata schema is dynamic: infer fields such as item_type, status, rating, etc., from the query context. "
+        "Use 'filters' for metadata fields that uniquely identify the document(s) to update, and 'new_metadata' for the new values. "
         "Examples: "
-        "- For 'Change the date of my homework task to tomorrow', set filters={'item_type': 'task', 'text': 'homework'}, new_metadata={'update_date': 'tomorrow'} "
-        "If unsure, attempt to infer likely metadata fields. "
-        "This tool should be used for any user request to update information in their personal database."
+        "- For 'Change the status of The Blues Brothers from to_watch to watched', first search_vault finds it has id='f6d3b7a0-fc3b-4bd0-840d-d76810dd4bb8', then call with filters={'id': 'f6d3b7a0-fc3b-4bd0-840d-d76810dd4bb8'}, new_metadata={'status': 'watched'} "
+        "- For 'Update homework task deadline to tomorrow', filters={'item_type': 'task', 'text': 'homework'}, new_metadata={'deadline': 'tomorrow'} "
+        "If multiple docs match the filters, they will all be updated. To update a single document, include the 'id' in filters. "
+        "This tool triggers an approval UI for the user to confirm the document and describe changes before update is applied."
     )
 )
 def update_vault_metadata(filters: Dict[str, Any], new_metadata: Dict[str, Any], config: RunnableConfig):
     """
-    Updates metadata for documents matching the filters.
-    - filters: Dict of metadata to match documents.
+    Updates metadata for documents matching the filters using versioning.
+    Creates a new version with updated metadata, marks old version as 'old'.
+    HITL approval required.
+    - filters: Dict of metadata to match documents (should include 'id' for single document updates).
     - new_metadata: Dict of new metadata to set.
     """
     logger.info(f"[TOOL] update_vault_metadata called with filters={filters!r}, new_metadata={new_metadata!r}, config={config!r}")
     vs = config["configurable"].get("vs")
     try:
-        asyncio.run(vs.update_metadata(filters, new_metadata))
+        asyncio.run(vs.update_document(filter_dict=filters, new_metadata=new_metadata))
         logger.info(f"[TOOL] update_vault_metadata: Updated metadata for docs matching: {filters}")
         return f"Updated metadata for docs matching: {filters}"
     except Exception as e:
