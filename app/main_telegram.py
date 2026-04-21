@@ -304,6 +304,7 @@ async def handle_agent_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 elif action_name == "update_vault_metadata":
                     filters = args.get("filters", {})
+                    proposed_new_metadata = dict(args.get("new_metadata", {}))
                     # Look up the actual document to display its content and metadata
                     vs = context.bot_data.get("vs")
                     doc_display = ""
@@ -319,16 +320,44 @@ async def handle_agent_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 )
                             if results:
                                 found_doc = results[0]
+                                # ── CURRENT version ──────────────────────────
                                 doc_text = found_doc.get("text", "")
                                 meta = {k: v for k, v in found_doc.get("metadata", {}).items()
                                         if k not in ("_id", "_collection_name", "version",
                                                      "creation_datetime", "update_datetime", "id")}
                                 meta_lines = "\n".join(f"  • {k}: {v}" for k, v in meta.items())
-                                doc_display = f"<b>📄 Content:</b> {doc_text}\n<b>🏷 Metadata:</b>\n{meta_lines}"
+                                current_block = f"<b>📄 Content:</b> {doc_text}\n<b>🏷 Metadata:</b>\n{meta_lines}"
+
+                                # ── PROPOSED new version ─────────────────────
+                                new_text_proposed = proposed_new_metadata.pop("text", None)  # agent uses "text" for content
+                                new_meta_proposed = {k: v for k, v in proposed_new_metadata.items()
+                                                     if k not in ("_id", "_collection_name", "version",
+                                                                  "creation_datetime", "update_datetime", "id", "__text__")}
+                                new_block_lines = []
+                                new_block_lines.append(f"  📄 Content: {new_text_proposed if new_text_proposed else doc_text}")
+                                merged_meta = {**meta, **new_meta_proposed}
+                                for k, v in merged_meta.items():
+                                    old_v = meta.get(k)
+                                    if k in new_meta_proposed and str(old_v) != str(v):
+                                        new_block_lines.append(f"  🏷 {k}: <s>{old_v}</s> → <b>{v}</b>")
+                                    else:
+                                        new_block_lines.append(f"  🏷 {k}: {v}")
+                                new_block = "\n".join(new_block_lines)
+
+                                doc_display = (
+                                    f"<b>Before:</b>\n{current_block}\n\n"
+                                    f"<b>After:</b>\n{new_block}"
+                                )
+
+                                # Restore "text" into proposed_new_metadata as "__text__" for the update step
+                                if new_text_proposed:
+                                    proposed_new_metadata["__text__"] = new_text_proposed
+
                                 # Store for use after user clicks Confirm
                                 context.user_data["pending_update_doc"] = found_doc
                                 context.user_data["pending_update_filters"] = filters
-                                logger.info(f"[handle_agent_chat] Update preview fetched: {found_doc}")
+                                context.user_data["pending_update_new_metadata"] = proposed_new_metadata
+                                logger.info(f"[handle_agent_chat] Update preview fetched: {found_doc}, proposed new_metadata={proposed_new_metadata}")
                             else:
                                 doc_display = f"<b>Filters used:</b> {filters}\n(Document not found with these filters)"
                         except Exception as e:
@@ -337,9 +366,9 @@ async def handle_agent_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     else:
                         doc_display = f"<b>Filters:</b> {filters}"
 
-                    confirm_text = f"🔍 Is this the document you want to update?\n\n{doc_display}"
+                    confirm_text = f"✏️ Approve this update?\n\n{doc_display}"
                     keyboard = [
-                        [InlineKeyboardButton("✅ Confirm", callback_data="confirm_update"),
+                        [InlineKeyboardButton("✅ Approve", callback_data="confirm_update"),
                          InlineKeyboardButton("🔍 Another Document", callback_data="refine_update")],
                         [InlineKeyboardButton("❌ Abort", callback_data="abort_update")]
                     ]
@@ -381,7 +410,11 @@ async def handle_callback(update, context):
     chat_id = query.message.chat.id
     logger.info(f"[handle_callback] Callback query received from user_id={user_id}, chat_id={chat_id}: {query.data}")
     try:
-        await query.answer()
+        try:
+            await query.answer()
+        except Exception as answer_err:
+            logger.warning(f"[handle_callback] query.answer() failed (stale/duplicate callback, ignoring): {answer_err}")
+            return  # Stale callback — nothing to do
         # Handle abort directly, do not call agent.invoke
         if query.data == "abort":
             await query.edit_message_text("❌ Action aborted. No changes were made.")
@@ -409,8 +442,7 @@ async def handle_callback(update, context):
             context.user_data.pop("pending_update_filters", None)
             return
         if query.data == "confirm_update":
-            # Resume the agent with a reject decision so the LangGraph thread finishes
-            # cleanly (we will apply the update ourselves after the user describes changes).
+            # Resume the agent with a reject decision so the LangGraph thread finishes cleanly.
             config = {
                 "configurable": {
                     "thread_id": str(chat_id),
@@ -424,9 +456,42 @@ async def handle_callback(update, context):
                 )
             except Exception as e:
                 logger.warning(f"[handle_callback] confirm_update: agent resume failed (non-fatal): {e}")
-            await query.edit_message_text("✏️ Please describe what changes you'd like to make to this document.")
-            logger.info("[handle_callback] User confirmed document for update. Agent thread cleared. Waiting for change description.")
-            context.user_data["awaiting_update_changes"] = True
+
+            pending_doc = context.user_data.get("pending_update_doc")
+            pending_filters = context.user_data.get("pending_update_filters")
+            pending_new_metadata = context.user_data.pop("pending_update_new_metadata", {})
+
+            # Normalize: agent may put new text under "text" key — move it to "__text__"
+            if "text" in pending_new_metadata and not pending_new_metadata.get("__text__"):
+                pending_new_metadata["__text__"] = pending_new_metadata.pop("text")
+
+            if pending_new_metadata and pending_filters:
+                # Agent already knows what to change — apply directly without asking again
+                vs = context.bot_data["vs"]
+                new_text = pending_new_metadata.pop("__text__", None)
+                new_metadata = pending_new_metadata
+                try:
+                    await vs.update_document(filter_dict=pending_filters, new_text=new_text, new_metadata=new_metadata)
+                except Exception as e:
+                    logger.error(f"[handle_callback] confirm_update: direct update failed: {e}", exc_info=True)
+                    await query.edit_message_text(f"❌ Update failed: {e}")
+                    context.user_data.pop("pending_update_doc", None)
+                    context.user_data.pop("pending_update_filters", None)
+                    return
+
+                summary_lines = [f"  • {k}: {v}" for k, v in new_metadata.items()]
+                if new_text:
+                    summary_lines.insert(0, f"  • content: {new_text}")
+                summary = "\n".join(summary_lines) or "  (no changes)"
+                await query.edit_message_text(f"✅ Document updated successfully!\n\n<b>Changes applied:</b>\n{summary}", parse_mode="HTML")
+                logger.info(f"[handle_callback] confirm_update: applied proposed changes directly. filters={pending_filters}, new_text={new_text}, new_metadata={new_metadata}")
+                context.user_data.pop("pending_update_doc", None)
+                context.user_data.pop("pending_update_filters", None)
+            else:
+                # Agent did not know what to change — ask the user to describe
+                await query.edit_message_text("✏️ Please describe what changes you'd like to make to this document.")
+                logger.info("[handle_callback] confirm_update: no proposed changes, asking user.")
+                context.user_data["awaiting_update_changes"] = True
             return
         if query.data == "refine_update":
             await query.edit_message_text("🔍 Please provide more details about which document you need:\n- Use natural language\n- Or specify metadata fields (e.g., 'task with status=done')")
