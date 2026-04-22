@@ -51,7 +51,7 @@ logger = configure_logging()
 
 _HITL_INTERRUPT_ON = {
     "add_to_vault":         {"allowed_decisions": ["approve", "reject", "edit"]},
-    "delete_from_vault":    {"allowed_decisions": ["approve", "reject", "edit"]},
+    "delete_from_vault":    {"allowed_decisions": ["approve", "reject"]},
     "update_vault_metadata":{"allowed_decisions": ["approve", "reject", "edit"]},
     "search_vault":         False,  # search runs automatically, no confirmation needed
 }

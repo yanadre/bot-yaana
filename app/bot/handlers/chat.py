@@ -46,7 +46,7 @@ from telegram.ext import ContextTypes
 
 from app.config import settings
 from app.bot.formatting import format_agent_response
-from app.bot.hitl import parse_interrupt, has_interrupt, build_approval_ui
+from app.bot.hitl import parse_interrupt, has_interrupt, build_approval_ui, build_multi_delete_text, build_multi_delete_keyboard
 from app.bot.update_flow import (
     apply_user_described_update,
     build_update_summary,
@@ -77,6 +77,30 @@ async def handle_agent_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
         vs = context.bot_data["vs"]
         agent = context.bot_data["agent"]
+
+        # ── State: refining delete search — run a direct VS search ───────────
+        if context.user_data.pop("refining_delete_search", False):
+            logger.info(f"[chat] Delete refinement query: {text!r}")
+            try:
+                results = await vs.search(query=text, top_k=50)
+                if results:
+                    context.user_data["pending_delete_docs"]     = results
+                    context.user_data["pending_delete_filters"]  = {}
+                    context.user_data["pending_delete_selected"] = set()
+                    context.user_data["pending_delete_page"]     = 0
+                    msg_text = build_multi_delete_text(results, set(), 0)
+                    keyboard  = build_multi_delete_keyboard(results, set(), 0)
+                    await update.message.reply_text(
+                        msg_text,
+                        parse_mode="HTML",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                else:
+                    await update.message.reply_text("🔍 No matching documents found. Try a different description.")
+            except Exception as e:
+                logger.error(f"[chat] Delete refinement search failed: {e}", exc_info=True)
+                await update.message.reply_text(f"❌ Search failed: {e}")
+            return
 
         # ── State: awaiting free-text update description ──────────────────────
         if context.user_data.get("awaiting_update_changes"):
@@ -140,6 +164,13 @@ async def handle_agent_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     except Exception as e:
         logger.error(f"[chat] Exception: {e}", exc_info=True)
         try:
-            await update.message.reply_text("⚠️ Something went wrong. Please try again.")
+            err_str = str(e)
+            if "RESOURCE_EXHAUSTED" in err_str or "429" in err_str or "quota" in err_str.lower():
+                await update.message.reply_text(
+                    "⏳ The AI model is temporarily unavailable (rate limit / quota exceeded).\n"
+                    "Please wait a minute and try again."
+                )
+            else:
+                await update.message.reply_text("⚠️ Something went wrong. Please try again.")
         except Exception:
             pass
