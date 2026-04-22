@@ -36,3 +36,7 @@ qdrant_storage/
 build/
 dist/
 *.egg-info/
+
+# untracked code
+router.py
+chat_bot_agent.py
