@@ -26,7 +26,7 @@ COPY . .
 # Set PYTHONPATH so imports work cleanly
 ENV PYTHONPATH=/app
 
-# Default command: 
-# Changed from 'app.main:app' to 'main:app' because main.py is in the root of /app
-# CMD ["python", "app.main_telegram:app", "--host", "0.0.0.0", "--port", "8000"]
-CMD ["python", "app/main_telegram.py"]
+# Default command:
+# main_telegram.py     ← legacy entry point (kept for reference)
+# main_telegram_v2.py  ← current modular entry point
+CMD ["python", "app/main_telegram_v2.py"]
