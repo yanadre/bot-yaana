@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     EMBEDDING_VECTOR_SIZE: int = 3072
 
     # agent
-    LLM_MODEL: str = "gemini-3.1-flash-lite-preview"#  "gemini-3-flash-preview" 
+    LLM_MODEL: str = "gemini-3.1-flash-lite-preview" #  "gemini-3-flash-preview" #"# 
     SYSTEM_PROMPT: str ="""You are a professional RAG Assistant with HITL approval workflow.
 Your database contains ALL user personal data: watch history, series, notes, metadata.
 
