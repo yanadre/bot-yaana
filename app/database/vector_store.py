@@ -105,37 +105,50 @@ class QdrantStore:
     def _build_filter(self, filter_dict: dict = None) -> models.Filter | None:
         """
         Build a Qdrant filter from a dictionary of metadata.
+
+        Special values:
+          None      → IsNull condition (field is absent / null)
+          "__any__" → condition is skipped entirely (match any value)
         """
         if not filter_dict:
             return None
         conditions = []
         for key, value in filter_dict.items():
-            # LangChain nests metadata under the 'metadata' key in the payload
-            conditions.append(
-                models.FieldCondition(
-                    key=f"metadata.{key}", 
-                    match=models.MatchValue(value=value)
+            field = f"metadata.{key}"
+            if value is None:
+                # Match documents where the field is absent or null
+                conditions.append(models.IsNullCondition(is_null=models.PayloadField(key=field)))
+            elif value == "__any__":
+                # Skip — no constraint on this field
+                continue
+            else:
+                conditions.append(
+                    models.FieldCondition(key=field, match=models.MatchValue(value=value))
                 )
-            )
-        return models.Filter(must=conditions)
+        return models.Filter(must=conditions) if conditions else None
 
     async def search(self, query: str, filter_dict: dict = None, top_k: int = 5, score_threshold: float = 0.2):
         """
         Semantic search or list documents in the collection.
-        Always filters for version='new' unless explicitly overridden.
-        query: search string (if empty, lists docs)
-        filter_dict: metadata filter
-        top_k: number of results
-        score_threshold: minimum similarity score
+
+        version filtering:
+          - By default (filter_dict has no 'version' key) → only 'new' docs are returned.
+          - Pass version="__any__"  → skip version filter entirely (all versions).
+          - Pass version=None       → match docs where version field is absent.
+          - Pass version="old"      → only old/archived docs.
+
+        Special filter values:
+          None      → IsNull  (field is absent)
+          "__any__" → skip condition (any value accepted)
         """
         logger.info(f"[QDRANT] search called with query='{query}', filter_dict={filter_dict}, top_k={top_k}, score_threshold={score_threshold}")
         if not self.vector_store:
             raise ValueError("Vector store not initialized")
-        # Always filter for version='new' unless explicitly overridden
         if filter_dict is None:
             filter_dict = {}
+        # Inject version='new' only when the caller hasn't set a preference
         if "version" not in filter_dict:
-            filter_dict["version"] = "new"
+            filter_dict = {**filter_dict, "version": "new"}
         qdrant_filter = self._build_filter(filter_dict)
         if not query or query.strip() == "":
             points, _ = self.sync_client.scroll(
@@ -233,6 +246,40 @@ class QdrantStore:
     async def close(self):
         if self.sync_client:
             self.sync_client.close()
+
+    async def migrate_unversioned_documents(self):
+        """
+        One-time migration: find all documents that have no 'version' field
+        in their metadata and stamp them with version='new' so they become
+        visible to search/delete.
+        """
+        if not self.sync_client:
+            raise ValueError("Sync client not initialized")
+        offset = None
+        total = 0
+        while True:
+            points, next_offset = self.sync_client.scroll(
+                collection_name=self.collection_name,
+                limit=100,
+                offset=offset,
+                with_payload=True,
+            )
+            for p in points:
+                meta = p.payload.get("metadata", {})
+                if "version" not in meta:
+                    updated_meta = {**meta, "version": "new"}
+                    self.sync_client.set_payload(
+                        collection_name=self.collection_name,
+                        payload={"metadata": updated_meta},
+                        points=[p.id],
+                    )
+                    total += 1
+                    logger.info(f"[QDRANT] migrate: stamped version='new' on point id={p.id}, text={p.payload.get('page_content', '')!r}")
+            if next_offset is None:
+                break
+            offset = next_offset
+        logger.info(f"[QDRANT] migrate_unversioned_documents: done, {total} document(s) updated.")
+        return total
 
     def print_all_documents(self, limit=100):
         """Log all documents in the Qdrant collection for debugging."""

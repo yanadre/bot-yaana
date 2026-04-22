@@ -20,7 +20,7 @@ from telegram.ext import (
 
 from app.config import settings
 from app.bot.setup import on_startup, on_shutdown
-from app.bot.handlers.commands import start
+from app.bot.handlers.commands import start, migrate
 from app.bot.handlers.chat import handle_agent_chat
 from app.bot.handlers.callbacks import handle_callback
 
@@ -35,6 +35,7 @@ def build_application():
     )
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("migrate", migrate))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_agent_chat))
 

@@ -4,25 +4,30 @@ handlers/callbacks.py
 Handles all Telegram inline keyboard button presses (CallbackQueryHandler).
 
 Callback data values and their meaning:
-┌──────────────────┬──────────────────────────────────────────────────────────┐
-│ callback_data    │ Action                                                   │
-├──────────────────┼──────────────────────────────────────────────────────────┤
-│ approve          │ Resume agent with "approve" — executes add/delete        │
-│ reject_and_retry │ Resume agent with "reject_and_retry"                     │
-│ edit             │ Resume agent with "edit"                                 │
-│ abort            │ Resume agent with "reject" silently; tell user aborted   │
-│ confirm_update   │ Apply the pending update (agent already proposed changes)│
-│ abort_update     │ Cancel the pending update; close the agent thread        │
-│ refine_update    │ Ask user to clarify which document they meant            │
-└──────────────────┴──────────────────────────────────────────────────────────┘
+┌────────────────────┬────────────────────────────────────────────────────────┐
+│ callback_data      │ Action                                                 │
+├────────────────────┼────────────────────────────────────────────────────────┤
+│ approve            │ Resume agent with "approve" — executes add             │
+│ reject_and_retry   │ Resume agent with "reject_and_retry"                   │
+│ edit               │ Resume agent with "edit"                               │
+│ abort              │ Resume agent with "reject" silently; tell user aborted │
+│ del_toggle_<idx>   │ Toggle document at absolute index in delete selection  │
+│ del_page_<n>       │ Navigate to page n in multi-delete list                │
+│ del_confirm        │ Execute deletion of all selected documents             │
+│ del_abort          │ Cancel the pending delete; close the agent thread      │
+│ confirm_update     │ Apply the pending update (agent already proposed)      │
+│ abort_update       │ Cancel the pending update; close the agent thread      │
+│ refine_update      │ Ask user to clarify which document they meant          │
+└────────────────────┴────────────────────────────────────────────────────────┘
 """
 
 import logging
 from langgraph.types import Command
-from telegram import Update
+from telegram import InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from app.bot.formatting import format_agent_response
+from app.bot.hitl import build_multi_delete_text, build_multi_delete_keyboard
 from app.bot.update_flow import apply_direct_update, build_update_summary
 
 logger = logging.getLogger("bot")
@@ -43,8 +48,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     data = query.data
     logger.info(f"[callback] user_id={user_id}, chat_id={chat_id}: {data!r}")
 
-    # Always answer the callback query first to dismiss Telegram's loading spinner.
-    # If the query is stale (duplicate tap / timeout) we get a BadRequest — just ignore it.
     try:
         await query.answer()
     except Exception as e:
@@ -52,17 +55,128 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     try:
-        vs  = context.bot_data["vs"]
+        vs    = context.bot_data["vs"]
         agent = context.bot_data["agent"]
         config = _agent_config(chat_id, vs)
 
-        # ── Abort (add / delete flow) ────────────────────────────────────────
+        # ── Abort (add flow) ──────────────────────────────────────────────────
         if data == "abort":
             try:
                 agent.invoke(_reject_command("User aborted."), config=config)
             except Exception as e:
                 logger.warning(f"[callback] abort: agent resume failed (non-fatal): {e}")
             await query.edit_message_text("❌ Action aborted. No changes were made.")
+            return
+
+        # ── Multi-delete: refine search ───────────────────────────────────────
+        if data == "del_refine":
+            await query.edit_message_text(
+                "🔍 Describe what you'd like to delete:\n"
+                '  - e.g. "all books with status=to_read"\n'
+                "  - or a specific title"
+            )
+            context.user_data["refining_delete_search"] = True
+            return
+
+        # ── Multi-delete: abort ───────────────────────────────────────────────
+        if data == "del_abort":
+            try:
+                agent.invoke(_reject_command("User aborted the delete."), config=config)
+            except Exception as e:
+                logger.warning(f"[callback] del_abort: agent resume failed (non-fatal): {e}")
+            context.user_data.pop("pending_delete_docs",     None)
+            context.user_data.pop("pending_delete_filters",  None)
+            context.user_data.pop("pending_delete_selected", None)
+            context.user_data.pop("pending_delete_page",     None)
+            await query.edit_message_text("❌ Delete cancelled. No changes were made.")
+            return
+
+        # ── Multi-delete: toggle selection ────────────────────────────────────
+        if data.startswith("del_toggle_"):
+            idx = int(data.split("_")[-1])
+            selected: set = context.user_data.get("pending_delete_selected", set())
+            if idx in selected:
+                selected.discard(idx)
+            else:
+                selected.add(idx)
+            context.user_data["pending_delete_selected"] = selected
+            docs = context.user_data.get("pending_delete_docs", [])
+            page = context.user_data.get("pending_delete_page", 0)
+            text = build_multi_delete_text(docs, selected, page)
+            keyboard = build_multi_delete_keyboard(docs, selected, page)
+            await query.edit_message_text(
+                text,
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
+
+        # ── Multi-delete: change page ─────────────────────────────────────────
+        if data.startswith("del_page_"):
+            page = int(data.split("_")[-1])
+            context.user_data["pending_delete_page"] = page
+            docs     = context.user_data.get("pending_delete_docs", [])
+            selected = context.user_data.get("pending_delete_selected", set())
+            text = build_multi_delete_text(docs, selected, page)
+            keyboard = build_multi_delete_keyboard(docs, selected, page)
+            await query.edit_message_text(
+                text,
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
+
+        # ── Multi-delete: confirm ─────────────────────────────────────────────
+        if data == "del_confirm":
+            selected: set = context.user_data.get("pending_delete_selected", set())
+            docs: list    = context.user_data.get("pending_delete_docs", [])
+
+            if not selected:
+                await query.answer("⚠️ Select at least one item first.", show_alert=True)
+                return
+
+            # Close the interrupted agent thread cleanly
+            try:
+                agent.invoke(_reject_command("Applying delete directly."), config=config)
+            except Exception as e:
+                logger.warning(f"[callback] del_confirm: agent resume failed (non-fatal): {e}")
+
+            deleted_titles = []
+            errors = []
+            for idx in sorted(selected):
+                doc = docs[idx]
+                doc_meta = doc.get("metadata", {})
+                doc_id   = doc_meta.get("id")
+                doc_text = doc.get("text", f"Item {idx + 1}")
+                try:
+                    if doc_id:
+                        await vs.delete({"id": doc_id})
+                    else:
+                        # Fall back to filters stored during interrupt
+                        filters = context.user_data.get("pending_delete_filters", {})
+                        await vs.delete(filters)
+                    deleted_titles.append(doc_text)
+                    logger.info(f"[callback] del_confirm: deleted doc_id={doc_id!r}, text={doc_text!r}")
+                except Exception as e:
+                    logger.error(f"[callback] del_confirm: failed to delete idx={idx}: {e}", exc_info=True)
+                    errors.append(doc_text)
+
+            # Clear pending state
+            context.user_data.pop("pending_delete_docs",     None)
+            context.user_data.pop("pending_delete_filters",  None)
+            context.user_data.pop("pending_delete_selected", None)
+            context.user_data.pop("pending_delete_page",     None)
+
+            if deleted_titles:
+                titles_str = "\n".join(f"  • {t}" for t in deleted_titles)
+                msg = f"🗑️ Deleted {len(deleted_titles)} item(s):\n{titles_str}"
+            else:
+                msg = "⚠️ No items were deleted."
+            if errors:
+                err_str = "\n".join(f"  • {t}" for t in errors)
+                msg += f"\n\n❌ Failed to delete:\n{err_str}"
+
+            await query.edit_message_text(msg)
             return
 
         # ── Abort update flow ─────────────────────────────────────────────────
@@ -79,7 +193,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         # ── Confirm update ────────────────────────────────────────────────────
         if data == "confirm_update":
-            # Close the interrupted agent thread cleanly
             try:
                 agent.invoke(
                     Command(resume={"decisions": [{"type": "reject", "message": "Applying update directly."}]}),
@@ -90,7 +203,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
             pending_filters      = context.user_data.pop("pending_update_filters",      None)
             pending_new_metadata = context.user_data.pop("pending_update_new_metadata", {})
-            context.user_data.pop("pending_update_doc", None)
+            pending_doc          = context.user_data.pop("pending_update_doc",          None)
 
             if pending_new_metadata and pending_filters:
                 try:
@@ -105,7 +218,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     logger.error(f"[callback] confirm_update: update failed: {e}", exc_info=True)
                     await query.edit_message_text(f"❌ Update failed: {e}")
             else:
-                # Agent didn't propose specific changes — ask the user
+                # Agent didn't propose specific changes — ask the user.
+                # Put state back so chat.py can use it when the user replies.
+                context.user_data["pending_update_filters"] = pending_filters
+                context.user_data["pending_update_doc"]     = pending_doc
                 await query.edit_message_text("✏️ Please describe what changes you'd like to make.")
                 context.user_data["awaiting_update_changes"] = True
             return
@@ -129,7 +245,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
 
         if data == "approve":
-            # Infer what action was approved to pick a nice confirmation message
             last_tool_call = None
             for msg in final_result.get("messages", []):
                 if getattr(msg, "tool_calls", None):

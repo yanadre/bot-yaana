@@ -14,13 +14,18 @@ logger = logging.getLogger(__name__)
     description=(
         "Search the vector store for user data. "
         "Always extract and use relevant metadata fields from the user's query for filtering. "
-        "The metadata schema is dynamic: infer fields such as item_type, update_date, etc., from the query context. "
+        "The metadata schema is dynamic: infer fields such as item_type, status, update_date, etc., from the query context. "
         "Use 'query' for the main search term and 'filter_dict' for all inferred metadata filters. "
         "Examples: "
         "- For 'What books do I have?', set filter_dict={'item_type': 'book'} "
         "- For 'Show movies from 2023', set filter_dict={'item_type': 'movie', 'update_date': '2023'} "
-        "If unsure, attempt to infer likely metadata fields. "
-        "This tool should be used to answer ANY user question about their personal data, including watched series, viewing history, notes, or any information stored in the user's database."
+        "- For 'Show all items regardless of status', omit the status key entirely "
+        "Special filter values: "
+        "- Omit a key to apply no constraint on that field (same as any value). "
+        "- Set a field to null/None to match documents where that field is absent (e.g. no status set). "
+        "- The 'version' field is automatically set to 'new' (current docs). You do NOT need to set it. "
+        "  Only include version in filter_dict if the user explicitly asks for archived/old documents. "
+        "This tool should be used to answer ANY user question about their personal data."
     )
 )
 def search_vault(query: str, filter_dict: Optional[Dict[str, Any]] = None, config: RunnableConfig = None):
@@ -74,14 +79,16 @@ def add_to_vault(text: str, metadata: Dict[str, Any], config: RunnableConfig):
 @tool(
     description=(
         "Delete documents from the vector store. "
-        "Always extract all relevant metadata fields from the user's input to construct the filters. "
-        "The metadata schema is dynamic: infer fields such as item_type, update_date, etc., from the query context. "
-        "Use 'filters' for all inferred metadata fields to identify which documents to delete. "
-        "Examples: "
-        "- For 'Delete all books', set filters={'item_type': 'book'} "
-        "- For 'Remove tasks from today', set filters={'item_type': 'task', 'update_date': 'today'} "
-        "If unsure, attempt to infer likely metadata fields. "
-        "This tool should be used for any user request to delete information from their personal database."
+        "NEVER use 'text' as a filter key — it is not a metadata field and will never match anything. "
+        "The only valid filter keys are real metadata fields: item_type, status, id, update_date, etc. "
+        "Choose the right strategy based on what the user asked: "
+        "- To delete ONE specific document (e.g. 'delete I, Robot'): call search_vault first, get the 'id', then use filters={'id': '<found_id>'}. "
+        "- To delete ALL documents matching a title/name (e.g. 'delete all I robot records'): use filters={'item_type': '<type>'} — do NOT filter by id. "
+        "  The UI will show ALL matching documents and let the user pick which ones to delete. "
+        "- To delete by metadata only (e.g. 'delete all tasks with status done'): filters={'item_type': 'task', 'status': 'done'} (no search needed). "
+        "- To delete everything: call with filters={} (empty). "
+        "When the user says 'all records' or 'all entries' of something, NEVER narrow by id — use broad metadata filters only. "
+        "This tool triggers an approval UI — the user will confirm before anything is deleted."
     )
 )
 def delete_from_vault(filters: Dict[str, Any], config: RunnableConfig):

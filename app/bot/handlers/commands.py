@@ -1,9 +1,7 @@
 """
 handlers/commands.py
 ────────────────────
-Telegram command handlers: /start
-(The legacy /add and /search commands are kept here but commented out —
-they were replaced by the conversational agent flow.)
+Telegram command handlers: /start, /migrate
 """
 
 import logging
@@ -26,3 +24,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Welcome back!")
     except Exception as e:
         logger.error(f"[/start] Exception: {e}", exc_info=True)
+
+
+async def migrate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    One-time admin command: stamps version='new' onto any documents that
+    predate the versioning system (i.e. have no 'version' metadata field).
+    """
+    user_id = update.effective_user.id
+    if user_id != settings.AUTHORIZED_ID:
+        return
+    vs = context.bot_data.get("vs")
+    if not vs:
+        await update.message.reply_text("❌ Vector store not available.")
+        return
+    await update.message.reply_text("⏳ Running migration…")
+    try:
+        count = await vs.migrate_unversioned_documents()
+        await update.message.reply_text(
+            f"✅ Migration complete. {count} document(s) updated with <code>version='new'</code>.",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.error(f"[/migrate] Exception: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Migration failed: {e}")
