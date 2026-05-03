@@ -14,6 +14,35 @@ B1 [ ] Log timestamps show UTC instead of local time
           with a converter that applies the local timezone.
      File: app/bot/setup.py
 
+B3 [ ] List toggle label is always "done" (✅/☐) regardless of list type
+     For non-task/shopping lists the check action has a different meaning:
+     "read" for book_list, "watched" for movie_list/series_list, "visited" for
+     place_list, etc.  Currently all lists use the same ✅/☐ toggle and the
+     "Remove done items" button, which is confusing.
+     Fix: add an optional "checked_label" (and matching emoji) to each type
+     definition in STRUCTURED_TYPES (e.g. {"checked_label": "watched",
+     "checked_emoji": "👁"}); fall back to "done" / ✅ for unknown *_list types.
+     Use this in:
+       – render_item_line() in structure_types.py
+       – _build_toggle_buttons() and _build_action_rows() in lists.py
+       – HITL preview in hitl.py
+     Files: app/bot/structure_types.py, app/bot/lists.py, app/bot/hitl.py
+
+B2 [ ] Agent does not create a list when asked to — just replies with plain text
+     When the user says "create a movie list from my movies", the agent searches
+     the vault correctly but then only writes out the results as prose instead of
+     calling add_to_vault to actually create a new list document with items[].
+     Root cause: the system prompt and tool descriptions only mention task_list and
+     shopping_list; the agent has no instruction for "create a *_list type from
+     existing docs", and only task_list/shopping_list are recognised by
+     _try_extract_list_doc so even if the agent did create e.g. a movie_list the
+     UI would not render.
+     Fix: extend STRUCTURED_ITEM_TYPES to include movie_list, book_list, series_list
+     and any *_list suffix; add explicit create-list-from-docs instructions to the
+     system prompt and add_to_vault tool description.
+     Files: app/config.py, app/agent/tools.py, app/bot/structure_types.py,
+            app/bot/handlers/chat.py, app/bot/hitl.py, app/bot/lists.py
+
 
 
 ADDITIONAL FUNCTIONALITY

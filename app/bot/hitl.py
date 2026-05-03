@@ -17,7 +17,7 @@ Public API:
 import logging
 from telegram import InlineKeyboardButton
 from app.bot.formatting import visible_meta, HIDDEN_META_KEYS
-from app.bot.structure_types import render_item_line, STRUCTURED_ITEM_TYPES
+from app.bot.structure_types import render_item_line, STRUCTURED_ITEM_TYPES, is_list_type, get_type_info
 
 logger = logging.getLogger("bot")
 
@@ -110,10 +110,11 @@ def format_document_card(text: str, metadata: dict) -> str:
     """
     meta      = visible_meta(metadata)
     item_type = meta.get("item_type", "")
-    emoji     = _TYPE_EMOJI.get(item_type, "📄")
+    type_cfg  = get_type_info(item_type)
+    emoji     = _TYPE_EMOJI.get(item_type, type_cfg.get("emoji", "📄"))
 
     # ── Structured (list) document ────────────────────────────────────────────
-    if item_type in STRUCTURED_ITEM_TYPES:
+    if is_list_type(item_type):
         items = metadata.get("items", [])
         lines = [f"{emoji} <b>{text}</b>"]
         for item in items[:10]:   # cap preview at 10 items in HITL card

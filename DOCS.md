@@ -106,7 +106,11 @@ Simple key-value documents (books, notes, reminders, …):
 
 ### Structured (list/task) documents
 
-Documents whose `item_type` is in `STRUCTURED_ITEM_TYPES` carry an `items` array:
+Documents whose `item_type` is recognised as a list type carry an `items` array.
+A type is considered a list if it is registered in `STRUCTURED_TYPES` **or** its name ends with `_list`
+(e.g. `movie_list`, `book_list`, `series_list`).  Use `is_list_type(item_type)` (from
+`app.bot.structure_types`) everywhere instead of checking `STRUCTURED_ITEM_TYPES` directly, so that
+ad-hoc agent-created list types render correctly without code changes.
 
 ```json
 {

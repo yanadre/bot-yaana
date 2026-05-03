@@ -13,7 +13,7 @@ Public API:
 import logging
 from telegram import InlineKeyboardButton
 
-from app.bot.structure_types import STRUCTURED_TYPES, render_item_line
+from app.bot.structure_types import STRUCTURED_TYPES, render_item_line, get_type_info
 
 logger = logging.getLogger("bot")
 
@@ -103,7 +103,7 @@ def render_list_text(doc: dict, page: int = 0, show_done: bool = False) -> str:
     name      = meta.get("name", "List")
     items     = meta.get("items", [])
 
-    type_cfg   = STRUCTURED_TYPES.get(item_type, {})
+    type_cfg   = get_type_info(item_type)
     emoji      = type_cfg.get("emoji", "📋")
     total      = len(items)
     done_count = sum(1 for i in items if i.get("checked"))

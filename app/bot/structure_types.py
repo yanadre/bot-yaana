@@ -54,10 +54,46 @@ STRUCTURED_TYPES: dict[str, dict] = {
         "emoji":       "✅",
         "item_fields": ["priority", "effort", "due_date"],
     },
+    "movie_list": {
+        "label":       "Movie List",
+        "emoji":       "🎬",
+        "item_fields": ["status"],                        # e.g. to_watch / watched
+    },
+    "book_list": {
+        "label":       "Book List",
+        "emoji":       "📚",
+        "item_fields": ["status"],                        # e.g. to_read / read
+    },
+    "series_list": {
+        "label":       "Series List",
+        "emoji":       "📺",
+        "item_fields": ["status"],
+    },
 }
 
 # Convenience set for quick membership checks
 STRUCTURED_ITEM_TYPES: set[str] = set(STRUCTURED_TYPES.keys())
+
+
+def is_list_type(item_type: str) -> bool:
+    """
+    Returns True for any known structured list type OR any item_type
+    ending in '_list' (allows agent to create ad-hoc lists like 'recipe_list').
+    """
+    return item_type in STRUCTURED_ITEM_TYPES or item_type.endswith("_list")
+
+
+def get_type_info(item_type: str) -> dict:
+    """
+    Returns the STRUCTURED_TYPES entry for a known type, or a sensible
+    default for unknown *_list types created by the agent.
+    """
+    if item_type in STRUCTURED_TYPES:
+        return STRUCTURED_TYPES[item_type]
+    if item_type.endswith("_list"):
+        label = item_type.replace("_", " ").title()
+        return {"label": label, "emoji": "📋", "item_fields": []}
+    return {"label": item_type, "emoji": "📋", "item_fields": []}
 
 
 # ── Item factory ──────────────────────────────────────────────────────────────
