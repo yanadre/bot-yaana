@@ -232,6 +232,57 @@ class QdrantStore:
         logger.info(f"[QDRANT] update_document: Inserted new version for doc_id={doc_id}, creation_datetime={creation_datetime}, update_datetime={now}")
 
 
+    async def patch_metadata(self, doc_id: str, fields: dict, new_text: str | None = None):
+        """
+        In-place patch — updates specific metadata fields on the Qdrant payload
+        WITHOUT creating a new versioned copy.
+
+        Optionally re-embeds the document text when new_text is provided,
+        so search stays accurate after content changes (e.g. checkbox toggles).
+
+        fields:    flat dict merged into existing metadata.
+        new_text:  if given, replaces the stored page_content and re-embeds.
+        """
+        logger.info(f"[QDRANT] patch_metadata called with doc_id={doc_id!r}, fields={list(fields.keys())}, reembed={new_text is not None}")
+        if not self.sync_client:
+            raise ValueError("Sync client not initialized")
+
+        # Find the current 'new' version of the document
+        qdrant_filter = self._build_filter({"id": doc_id, "version": "new"})
+        points, _ = self.sync_client.scroll(
+            collection_name=self.collection_name,
+            scroll_filter=qdrant_filter,
+            limit=1,
+            with_payload=True,
+        )
+        if not points:
+            raise Exception(f"patch_metadata: no document found with id={doc_id!r}")
+
+        point = points[0]
+        existing_meta = point.payload.get("metadata", {}).copy()
+        existing_meta.update(fields)
+
+        if new_text is not None:
+            # Re-embed and overwrite the vector in-place
+            embedding = await self.embedding_model.aembed_query(new_text)
+            self.sync_client.overwrite_payload(
+                collection_name=self.collection_name,
+                payload={"page_content": new_text, "metadata": existing_meta},
+                points=[point.id],
+            )
+            from qdrant_client.models import PointVectors
+            self.sync_client.update_vectors(
+                collection_name=self.collection_name,
+                points=[PointVectors(id=point.id, vector=embedding)],
+            )
+        else:
+            self.sync_client.set_payload(
+                collection_name=self.collection_name,
+                payload={"metadata": existing_meta},
+                points=[point.id],
+            )
+        logger.info(f"[QDRANT] patch_metadata: patched point id={point.id}, doc_id={doc_id!r}")
+
     async def delete(self, filter_dict: dict):
         logger.info(f"[QDRANT] delete called with filter_dict={filter_dict}")
         if not self.sync_client:
