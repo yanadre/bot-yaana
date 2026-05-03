@@ -1,0 +1,12 @@
+# Production compose. Run with:
+#   docker compose -f compose.yaml -f compose.prod.yaml up -d
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile    # explicitly use the production Dockerfile (not Dockerfile.dev)
+    env_file:
+      - .env.prod
+    restart: always
+    # No source mounts — runs the clean built image only.

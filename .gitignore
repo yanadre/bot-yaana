@@ -7,8 +7,10 @@ __pycache__
 # Virtual environments
 venv/
 .env/
-.env.*
 .env
+.env.dev
+.env.prod
+!.env.prod.example
 
 # VS Code
 .vscode/
@@ -36,6 +38,9 @@ qdrant_storage/
 build/
 dist/
 *.egg-info/
+
+# Dev notes (personal, not for repo)
+DEV_NOTES.md
 
 # untracked code
 router.py

@@ -1,0 +1,15 @@
+# Auto-loaded by `docker compose up` alongside compose.yaml.
+# Dev-only overrides: source mount, dev env file, debugpy port.
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    env_file:
+      - .env.dev
+    volumes:
+      - ./app:/app/app        # live source mount — no rebuild needed on code changes
+      - ./logs:/app/logs
+    ports:
+      - "5678:5678"           # debugpy remote attach port

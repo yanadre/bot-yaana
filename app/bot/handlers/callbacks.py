@@ -4,30 +4,40 @@ handlers/callbacks.py
 Handles all Telegram inline keyboard button presses (CallbackQueryHandler).
 
 Callback data values and their meaning:
-┌────────────────────┬────────────────────────────────────────────────────────┐
-│ callback_data      │ Action                                                 │
-├────────────────────┼────────────────────────────────────────────────────────┤
-│ approve            │ Resume agent with "approve" — executes add             │
-│ reject_and_retry   │ Resume agent with "reject_and_retry"                   │
-│ edit               │ Resume agent with "edit"                               │
-│ abort              │ Resume agent with "reject" silently; tell user aborted │
-│ del_toggle_<idx>   │ Toggle document at absolute index in delete selection  │
-│ del_page_<n>       │ Navigate to page n in multi-delete list                │
-│ del_confirm        │ Execute deletion of all selected documents             │
-│ del_abort          │ Cancel the pending delete; close the agent thread      │
-│ confirm_update     │ Apply the pending update (agent already proposed)      │
-│ abort_update       │ Cancel the pending update; close the agent thread      │
-│ refine_update      │ Ask user to clarify which document they meant          │
-└────────────────────┴────────────────────────────────────────────────────────┘
+┌──────────────────────────────┬──────────────────────────────────────────────────────────────┐
+│ callback_data                │ Action                                                       │
+├──────────────────────────────┼──────────────────────────────────────────────────────────────┤
+│ approve                      │ Resume agent with "approve" — executes add                   │
+│ reject_and_retry             │ Resume agent with "reject_and_retry"                         │
+│ edit                         │ Resume agent with "edit"                                     │
+│ abort                        │ Resume agent with "reject" silently; tell user aborted       │
+│ del_toggle_<idx>             │ Toggle document at absolute index in delete selection        │
+│ del_page_<n>                 │ Navigate to page n in multi-delete list                      │
+│ del_confirm                  │ Execute deletion of all selected documents                   │
+│ del_abort                    │ Cancel the pending delete; close the agent thread            │
+│ confirm_update               │ Apply the pending update (agent already proposed)            │
+│ abort_update                 │ Cancel the pending update; close the agent thread            │
+│ refine_update                │ Ask user to clarify which document they meant                │
+│ list_open_<doc_id>           │ Open a list document by id (from the picker)                 │
+│ list_toggle_<doc_id>_<idx>   │ Toggle checked state of item at index in a list doc          │
+│ list_page_<doc_id>_<page>    │ Navigate to page in a list doc                               │
+│ list_add_<doc_id>            │ Prompt user to type a new item to append to the list         │
+│ list_clear_<doc_id>          │ Ask confirmation before removing done items          │
+│ list_clear_confirm_<doc_id>  │ Execute removal of done items (after confirmation)   │
+└──────────────────────────────┴──────────────────────────────────────────────────────────────┘
 """
 
 import logging
+from datetime import datetime, timezone
+
 from langgraph.types import Command
-from telegram import InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from app.bot.formatting import format_agent_response
 from app.bot.hitl import build_multi_delete_text, build_multi_delete_keyboard
+from app.bot.list_service import fetch_doc, save_items, render_list, edit_list_message
+from app.bot.structure_types import make_item
 from app.bot.update_flow import apply_direct_update, build_update_summary
 
 logger = logging.getLogger("bot")
@@ -236,6 +246,114 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             context.user_data["refining_update_search"] = True
             return
 
+        # ── List: toggle show/hide done items ────────────────────────────────
+        if data.startswith("list_showdone_"):
+            parts     = data.split("_")
+            doc_id    = "_".join(parts[2:-1])
+            show_done = parts[-1] == "1"
+            context.user_data[f"list_showdone_{doc_id}"] = show_done
+            doc = await fetch_doc(vs, doc_id)
+            if not doc:
+                await query.edit_message_text("❌ List not found.")
+                return
+            await edit_list_message(context.bot, query.message.chat_id, query.message.message_id, doc, context, doc_id)
+            return
+
+        # ── List: open from picker ────────────────────────────────────────────
+        if data.startswith("list_open_"):
+            doc_id = data[len("list_open_"):]
+            context.user_data[f"list_page_{doc_id}"] = 0   # reset to page 0
+            doc = await fetch_doc(vs, doc_id)
+            if not doc:
+                await query.edit_message_text("❌ List not found.")
+                return
+            await edit_list_message(context.bot, query.message.chat_id, query.message.message_id, doc, context, doc_id)
+            return
+
+        # ── List: toggle item checked state ───────────────────────────────────
+        if data.startswith("list_toggle_"):
+            parts  = data.split("_")
+            idx    = int(parts[-1])
+            doc_id = "_".join(parts[2:-1])
+
+            doc = await fetch_doc(vs, doc_id)
+            if not doc:
+                await query.edit_message_text("❌ List not found.")
+                return
+
+            meta  = doc.get("metadata", {})
+            items = list(meta.get("items", []))
+            if idx >= len(items):
+                await query.answer("⚠️ Item not found.", show_alert=True)
+                return
+
+            now = datetime.now(timezone.utc).isoformat()
+            items[idx]["checked"]    = not items[idx].get("checked", False)
+            items[idx]["checked_at"] = now if items[idx]["checked"] else None
+            await save_items(vs, doc_id, meta, items)
+
+            doc = await fetch_doc(vs, doc_id) or doc
+            await edit_list_message(context.bot, query.message.chat_id, query.message.message_id, doc, context, doc_id)
+            return
+
+        # ── List: change page ─────────────────────────────────────────────────
+        if data.startswith("list_page_"):
+            parts  = data.split("_")
+            page   = int(parts[-1])
+            doc_id = "_".join(parts[2:-1])
+            context.user_data[f"list_page_{doc_id}"] = page
+            doc = await fetch_doc(vs, doc_id)
+            if not doc:
+                await query.edit_message_text("❌ List not found.")
+                return
+            await edit_list_message(context.bot, query.message.chat_id, query.message.message_id, doc, context, doc_id)
+            return
+
+        # ── List: prompt to add a new item ────────────────────────────────────
+        if data.startswith("list_add_"):
+            doc_id = data[len("list_add_"):]
+            context.user_data["pending_list_add_doc_id"]     = doc_id
+            context.user_data["pending_list_add_message_id"] = query.message.message_id
+            await query.message.reply_text(
+                "✏️ Send me the item you'd like to add:\n"
+                "<i>(for tasks you can include priority/effort, "
+                'e.g. "Fix login bug | high | small")</i>',
+                parse_mode="HTML",
+            )
+            return
+
+        # ── List: remove done items ───────────────────────────────────────────
+        if data.startswith("list_clear_confirm_"):
+            doc_id = data[len("list_clear_confirm_"):]
+            doc    = await fetch_doc(vs, doc_id)
+            if not doc:
+                await query.edit_message_text("❌ List not found.")
+                return
+            meta  = doc.get("metadata", {})
+            items = [i for i in meta.get("items", []) if not i.get("checked")]
+            await save_items(vs, doc_id, meta, items)
+            doc = await fetch_doc(vs, doc_id) or doc
+            await edit_list_message(context.bot, query.message.chat_id, query.message.message_id, doc, context, doc_id)
+            return
+
+        if data.startswith("list_clear_"):
+            doc_id     = data[len("list_clear_"):]
+            doc        = await fetch_doc(vs, doc_id)
+            if not doc:
+                await query.edit_message_text("❌ List not found.")
+                return
+            done_count = sum(1 for i in doc.get("metadata", {}).get("items", []) if i.get("checked"))
+            await query.edit_message_text(
+                f"🗑️ Remove <b>{done_count} done item{'s' if done_count != 1 else ''}</b> permanently?\n"
+                "<i>This cannot be undone.</i>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ Yes, remove", callback_data=f"list_clear_confirm_{doc_id}"),
+                    InlineKeyboardButton("❌ Cancel",      callback_data=f"list_open_{doc_id}"),
+                ]]),
+            )
+            return
+
         # ── Standard HITL decisions (approve / reject_and_retry / edit) ──────
         decision = [{"type": data}]
         logger.debug(f"[callback] Resuming agent with decision: {decision}")
@@ -263,8 +381,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         else:
             confirmation = format_agent_response(final_result["messages"][-1].content)
 
-        if query.message.text != confirmation:
-            await query.edit_message_text(confirmation)
+        try:
+            if query.message.text != confirmation:
+                await query.edit_message_text(confirmation)
+        except Exception as e:
+            if "Message is not modified" in str(e):
+                pass   # user tapped the button twice — safe to ignore
+            else:
+                raise
         logger.info(f"[callback] Final message sent: {confirmation!r}")
 
     except Exception as e:
