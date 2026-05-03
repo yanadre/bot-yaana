@@ -17,6 +17,7 @@ Public API:
 import logging
 from telegram import InlineKeyboardButton
 from app.bot.formatting import visible_meta, HIDDEN_META_KEYS
+from app.bot.structure_types import render_item_line, STRUCTURED_ITEM_TYPES
 
 logger = logging.getLogger("bot")
 
@@ -96,15 +97,32 @@ def format_document_card(text: str, metadata: dict) -> str:
     """
     Returns a nicely formatted HTML card for a single vault document.
 
-    Example:
+    Flat document:
         🎬 <b>The Godfather</b>
         ├ Status:  watched
         └ Rating:  10
-    """
-    meta = visible_meta(metadata)
-    item_type = meta.get("item_type", "")
-    emoji = _TYPE_EMOJI.get(item_type, "📄")
 
+    List document:
+        🛒 <b>Groceries</b>
+        ✅ milk
+        ☐ eggs
+        ☐ bread
+    """
+    meta      = visible_meta(metadata)
+    item_type = meta.get("item_type", "")
+    emoji     = _TYPE_EMOJI.get(item_type, "📄")
+
+    # ── Structured (list) document ────────────────────────────────────────────
+    if item_type in STRUCTURED_ITEM_TYPES:
+        items = metadata.get("items", [])
+        lines = [f"{emoji} <b>{text}</b>"]
+        for item in items[:10]:   # cap preview at 10 items in HITL card
+            lines.append(f"  {render_item_line(item, item_type)}")
+        if len(items) > 10:
+            lines.append(f"  <i>… and {len(items) - 10} more</i>")
+        return "\n".join(lines)
+
+    # ── Flat document ─────────────────────────────────────────────────────────
     lines = [f"{emoji} <b>{text}</b>"]
     meta_items = [(k, v) for k, v in meta.items() if k != "item_type"]
     for i, (k, v) in enumerate(meta_items):
@@ -124,6 +142,7 @@ def _format_after_card(
     """
     Builds the 'After' card for the update preview.
     Changed fields are shown with strikethrough old → bold new.
+    Items[] arrays are rendered as human-readable lines.
     """
     after_text = new_text if new_text else original_text
     after_meta = {**original_meta, **new_meta_proposed}
@@ -141,7 +160,14 @@ def _format_after_card(
         prefix = "└" if i == len(after_items) - 1 else "├"
         label = _META_LABEL.get(k, k.replace("_", " ").capitalize())
         old_v = original_meta.get(k)
-        if k in new_meta_proposed and str(old_v) != str(v):
+        changed = k in new_meta_proposed and str(old_v) != str(v)
+
+        # Render items[] as human-readable lines instead of raw dicts
+        if k == "items" and isinstance(v, list):
+            lines.append(f"{prefix} {label}{'  <i>(updated)</i>' if changed else ''}:")
+            for item in v:
+                lines.append(f"     {render_item_line(item, item_type)}")
+        elif changed:
             lines.append(f"{prefix} {label}:  <s>{old_v}</s> → <b>{v}</b>")
         else:
             lines.append(f"{prefix} {label}:  {v}")

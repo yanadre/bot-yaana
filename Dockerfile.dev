@@ -19,4 +19,4 @@ COPY . .
 ENV PYTHONPATH=/app
 
 # Start app through debugpy, listening on all interfaces, waiting for VS Code to attach.
-CMD ["python", "-m", "debugpy", "--listen", "0.0.0.0:5678", "--wait-for-client", "app/main_telegram_v2.py"]
+CMD ["python", "-m", "debugpy", "--listen", "0.0.0.0:5678", "app/main_telegram_v2.py"]
