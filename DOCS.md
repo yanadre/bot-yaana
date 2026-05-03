@@ -386,25 +386,3 @@ See [Structured Types Registry](#structured-types-registry) above.
 4. Add HITL interrupt handling in `app/bot/hitl.py` if the tool requires user confirmation.
 
 ---
-
-## What's Next
-
-Rough priority order — pick what matters most:
-
-### 🐛 Known issues / polish
-| # | Issue | File |
-|---|---|---|
-| 1 | Old Qdrant versions of the Work list (pre-`patch_metadata`) are still there — run a one-off cleanup to delete points with `version=old` and `item_type in (task_list, shopping_list)` | `vector_store.py` |
-| 2 | `list_showdone` toggle re-fetches Qdrant on every tap — could be cached in `user_data` for 30 s | `callbacks.py` |
-| 3 | If the bot restarts while a user has a list open, tapping old buttons still works but `show_done` / `page` state resets to defaults (acceptable for now) | — |
-
-### ✨ Features
-| # | Feature | Complexity |
-|---|---|---|
-| 1 | **Swipe-to-delete single item** — long-press or a trash icon next to each item row | Medium |
-| 2 | **Reorder items** — ↑ ↓ buttons or drag via inline query | High |
-| 3 | **Due-date reminders** — daily cron that scans `task_list` items with `due_date ≤ today` and sends a Telegram message | Medium |
-| 4 | **Multiple lists picker on `/tasks`** — already works; add a count badge showing how many overdue items each list has | Small |
-| 5 | **Agent-driven list editing** — let the agent add/remove individual items via tool calls (currently only the UI does this) | Medium |
-| 6 | **Streaming responses** — replace `agent.invoke()` with `agent.astream_events()` so users see tokens appearing live | Medium |
-| 7 | **Production deployment guide** — SSH + `docker compose -f compose.yaml up --build -d` + systemd watchdog | Small |
