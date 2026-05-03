@@ -1,0 +1,81 @@
+bot-yaana — Backlog
+===================
+
+Living document. Update as issues are found and features are planned.
+Status: [ ] open  [~] in progress  [x] done
+
+
+BUGS
+----
+
+B1 [ ] Log timestamps show UTC instead of local time
+     All log lines are hours behind actual local time.
+     Fix: set TZ env var in compose.override.yaml, or configure logging.Formatter
+          with a converter that applies the local timezone.
+     File: app/bot/setup.py
+
+
+
+ADDITIONAL FUNCTIONALITY
+------------------------
+
+Next up
+-------
+
+F1 [ ] Due-date reminders  [complexity: medium]
+     A daily background job that scans task_list items where due_date <= today
+     and sends a Telegram push notification to the user.
+     How: use PTB's JobQueue — application.job_queue.run_daily(). Chat ID comes
+          from config. Runs inside the existing bot process, no extra service needed.
+
+F2 [ ] Rich item detail / elaboration  [complexity: medium]
+     Each list item gets an optional "notes" field for free-form text
+     (links, context, sub-steps). Tapping the item opens a detail view as a
+     separate bot message.
+     How: extend make_item() in structure_types.py; add a
+          list_detail_<doc_id>_<idx> callback; render notes in a formatted reply.
+
+F3 [ ] Convenient item editing  [complexity: medium]
+     Edit an item's text, priority, effort, or due_date without going through the
+     agent. Two design options:
+       (a) UI-only: tap ✏️ next to an item → bot asks "send new value"
+       (b) Hybrid: shortcut syntax like "new text | high | small | 2026-06-01"
+
+F4 [ ] Delete a single list item  [complexity: small]
+     A 🗑 button on each item row. Tap → confirm → item removed and list refreshes.
+     How: add list_delete_<doc_id>_<idx> callback + a confirm step, same pattern
+          already used for "remove done items" confirmation.
+
+F5 [ ] Agent-driven list editing  [complexity: medium]
+     Teach the agent to add, remove, or update individual items in a list via
+     tool calls, so the user can say "remove milk from the shopping list" or
+     "mark the gym task as high priority".
+     How: extend update_vault_metadata tool or add a dedicated patch_list_item
+          tool; update the agent system prompt accordingly.
+
+F6 [ ] Streaming LLM responses  [complexity: medium]
+     Show a live "⏳ Thinking…" message that updates as the model streams tokens,
+     instead of waiting for the full response.
+     How: use agent.astream_events(version="v2"), debounce bot.edit_message_text()
+          calls every ~300 ms to stay within Telegram rate limits. Fully supported
+          by the Telegram Bot API.
+
+F7 [ ] Server deployment  [complexity: small]
+     A step-by-step guide for deploying to a production VPS, with a systemd
+     service file so the bot auto-restarts on reboot or crash.
+     How: SSH + docker compose -f compose.yaml up --build -d + systemd unit file
+          with Restart=always and a watchdog ping.
+
+
+
+Future / lower priority
+-----------------------
+
+F8 [ ] Reorder list items (↑ ↓ buttons per row)
+     High complexity, low urgency. Requires careful index management.
+
+F9 [ ] Multiple named task boards (Kanban columns: todo / in-progress / done)
+     Requires a schema change and a new rendering layout.
+
+F10 [ ] Search within a list
+      Add a list_search_<doc_id> callback and a text-input flow.
