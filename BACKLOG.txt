@@ -51,6 +51,31 @@ ADDITIONAL FUNCTIONALITY
 Next up
 -------
 
+F0 [ ] Smart retrieval — adaptive filters, hybrid search, dynamic top_k  [complexity: medium-high]
+     The current agent uses a fixed top_k and relies on the LLM to choose between
+     a plain semantic search and a metadata filter call. This falls short of the
+     design goal where retrieval is fully intelligent:
+       (a) Metadata filters: the agent should automatically derive Qdrant filter
+           dicts from the semantic content of the query (e.g. "unwatched movies"
+           → filter item_type=movie AND status!=watched), not only when the user
+           explicitly says "filter by …".
+       (b) Hybrid search: combine metadata filtering + semantic similarity in one
+           query instead of two separate tool calls. Qdrant supports this natively
+           via filtered ANN search.
+       (c) Dynamic top_k: the agent should reason about how many results the
+           question needs. Narrow lookups ("what did I rate Dune?") → k=1–3.
+           Open browsing ("what should I watch next?") → k=10–20. Broad
+           aggregations ("summarise all my books") → k=all. Add this reasoning
+           to the system prompt and/or search tool description.
+       (d) Smart metadata at save time: the system prompt should instruct the
+           agent to choose metadata fields that will be useful for future
+           filtering — e.g. always store "status", "year", "genre" for media
+           even if the user didn't mention them, inferring from context where
+           possible.
+     Files: app/config.py (system prompt), app/agent/tools.py (search tool
+            description + schema), app/database/vector_store.py (hybrid search
+            support if not already present)
+
 F1 [ ] Due-date reminders  [complexity: medium]
      A daily background job that scans task_list items where due_date <= today
      and sends a Telegram push notification to the user.
