@@ -1,24 +1,114 @@
 # bot-yaana — Project Documentation
 
-> Personal Telegram bot with an AI agent (LangGraph), a vector store (Qdrant), and interactive list/task management.
+> Personal Telegram bot with an AI agent (LangGraph), a vector store (Qdrant), and a personal knowledge vault with interactive list management.
+
+---
+
+## Project Overview
+
+**bot-yaana** is a private personal assistant that lives in Telegram and grows smarter the more you use it.
+
+---
+
+### Vision
+
+The long-term goal is a single assistant that **knows your life and actively helps you live it** — not just a place to store things, but something that:
+
+- Stores whatever you give it, in whatever form you give it — "I watched Dune, loved it" gets saved as a movie record; "just finished reading Dune by Frank Herbert" updates that same record rather than creating a new one. You can paste in a full article you wrote, or start a trip record before you leave and keep adding to it — notes, costs, impressions — during and after. No manual schema or categories; the agent figures out what fields are worth keeping
+- Answers questions and helps make decisions using what it knows about you ("what should I watch tonight?" → draws on your taste, ratings, and what's already on your list)
+- Manages structured things (shopping, tasks, watchlists) with a real interactive UI
+- Sends smart reminders and surfaces things proactively, not just when asked
+- Eventually: finds and indexes files on your phone so everything is reachable through conversation
+
+The key design principle is that **capture should be effortless and retrieval should be intelligent** — the bot does the work of structuring, filtering, and reasoning, not you. At the same time, common actions (opening a list, adding an item, checking something off) bypass the AI entirely for instant response — the agent is invoked only when it adds real value.
+
+---
+
+### Where it is today
+
+The foundation is built and working:
+
+| Capability | Status |
+|---|---|
+| Save / update / delete anything in plain language | ✅ Working |
+| Auto-extract and store structured fields from free-text | ✅ Working (quality depends on system prompt) |
+| Search the vault by meaning | ✅ Working |
+| Interactive list UI (shopping, tasks, watchlists, …) | ✅ Working |
+| Fast-path list commands (`/list`, `/tasks`, `/newlist`, `/newtasks`) | ✅ Working |
+| Confirm before any write (preview + approve/reject) | ✅ Working |
+| Answer questions using stored data as context | ⚠️ Basic — reacts when asked, doesn't reason proactively |
+| Automatically narrow searches based on question intent | ⚠️ Partial — not reliable |
+| Find the right amount of data for the question | ⚠️ Partial — not reliable |
+| Reminders / proactive push messages | ❌ Not implemented |
+| Scheduling and calendar awareness | ❌ Not implemented |
+| Ingest files from phone (photos, voice, docs) | ❌ Not implemented |
+
+---
+
+### Roadmap to the vision
+
+**Phase 1 — Make the intelligence layer reliable** *(current focus)*
+
+The infrastructure is sound but the agent's reasoning is shallow. The priority is closing the gap between what the system *can* do and what it *reliably does*:
+
+1. **Smarter search** — the agent should automatically narrow results based on what the question implies, combine different search strategies, and retrieve the right amount of data for the question at hand. See `BACKLOG.txt` F0.
+2. **Smarter capture** — the agent should infer and store standard fields for known domains (e.g. status, year, genre, rating for media) even when not explicitly mentioned, so the vault is more useful later.
+3. **Fix known bugs** — list type toggle labels (B3), agent not creating lists from existing docs (B2). See `BACKLOG.txt`.
+
+**Phase 2 — From reactive to proactive**
+
+Once retrieval is reliable, the agent can start doing things without being asked:
+
+4. **Due-date reminders** — daily scan of task items; push a Telegram message when something is due or overdue.
+5. **Proactive surfacing** — periodic nudges based on vault state ("you have 5 unwatched Villeneuve films", "your reading list hasn't changed in 3 weeks").
+6. **Smarter answers to open questions** — when asked "what should I watch?", the agent doesn't just list unwatched items; it reasons about ratings, genres, mood, and recency.
+
+**Phase 3 — Richer input and scheduling**
+
+7. **File ingestion** — accept photos, voice memos, and documents via Telegram. Extract text (OCR / Whisper), generate metadata, store in vault.
+8. **Scheduling awareness** — understand dates, recurring events, and deadlines as first-class concepts.
+9. **Calendar integration** — read/write events in an external calendar based on conversation.
+
+---
+
+### What it is not
+
+- Not a multi-user service — access is locked to a single `AUTHORIZED_ID`.
+- Not a general-purpose chatbot — every response is grounded in your personal vault.
+
+---
+
+### Tech stack
+
+| Layer | Technology |
+|---|---|
+| Bot framework | `python-telegram-bot` (v20+, async) |
+| AI agent | `langgraph` with Gemini / OpenAI LLM |
+| Vector store | `qdrant-client` + `langchain-qdrant` |
+| Embeddings | `langchain-google-genai` / `langchain-openai` |
+| Runtime | Docker Compose (dev + prod configs) |
+
+For the full bug and feature list see **`BACKLOG.txt`** at the project root.
+
 
 ---
 
 ## Table of Contents
 
-1. [Architecture Overview](#architecture-overview)
-2. [Project Structure](#project-structure)
-3. [Data Schema](#data-schema)
-4. [Commands Reference](#commands-reference)
-5. [Flows](#flows)
+1. [Project Overview](#project-overview)
+2. [Architecture Overview](#architecture-overview)
+3. [Project Structure](#project-structure)
+4. [Data Schema](#data-schema)
+5. [Commands Reference](#commands-reference)
+6. [Flows](#flows)
    - [Agent Chat Flow (HITL)](#agent-chat-flow-hitl)
    - [Fast-Path List/Task Flow](#fast-path-listtask-flow)
    - [Callback (Inline Keyboard) Flow](#callback-inline-keyboard-flow)
-6. [Structured Types Registry](#structured-types-registry)
-7. [Dev / Prod Separation](#dev--prod-separation)
-8. [Hot-Reload Development](#hot-reload-development)
-9. [Deployment](#deployment)
-10. [Extending the Bot](#extending-the-bot)
+7. [Structured Types Registry](#structured-types-registry)
+8. [Dev / Prod Separation](#dev--prod-separation)
+9. [Hot-Reload Development](#hot-reload-development)
+10. [Deployment](#deployment)
+11. [Extending the Bot](#extending-the-bot)
 
 ---
 
@@ -45,7 +135,7 @@ Telegram ──► PTB Application ──► Handlers
 | `python-telegram-bot` | Telegram API client & dispatcher |
 | `langgraph` | Agent graph with human-in-the-loop (HITL) interrupts |
 | `qdrant-client` + `langchain-qdrant` | Semantic vector store |
-| `langchain-openai` | Embeddings + LLM calls |
+| `langchain-google-genai` / `langchain-openai` | Embeddings + LLM calls |
 
 ---
 
@@ -56,7 +146,6 @@ app/
 ├── main_telegram_v2.py     Entry point — wires all handlers, starts polling
 ├── config.py               Pydantic settings (reads .env / .env.dev)
 ├── chat_bot_agent.py       LangGraph agent definition
-├── router.py               (legacy)
 │
 ├── agent/
 │   ├── tools.py            Agent tools: add/update/delete/search vault
@@ -89,7 +178,7 @@ app/
 
 ### Flat documents
 
-Simple key-value documents (books, notes, reminders, …):
+The most common form — a document with a set of metadata fields the agent inferred from what you said. Fields vary by type and context; there is no fixed schema.
 
 ```json
 {
@@ -106,11 +195,7 @@ Simple key-value documents (books, notes, reminders, …):
 
 ### Structured (list/task) documents
 
-Documents whose `item_type` is recognised as a list type carry an `items` array.
-A type is considered a list if it is registered in `STRUCTURED_TYPES` **or** its name ends with `_list`
-(e.g. `movie_list`, `book_list`, `series_list`).  Use `is_list_type(item_type)` (from
-`app.bot.structure_types`) everywhere instead of checking `STRUCTURED_ITEM_TYPES` directly, so that
-ad-hoc agent-created list types render correctly without code changes.
+Documents with an `item_type` ending in `_list` (e.g. `shopping_list`, `task_list`, `movie_list`, `book_list`) carry an `items` array. The bot recognises any `*_list` type — you don't need to register new list types explicitly.
 
 ```json
 {
@@ -256,7 +341,9 @@ All callbacks go through `handle_callback()` in `app/bot/handlers/callbacks.py`.
 
 `app/bot/structure_types.py` is the single source of truth for all complex document types.
 
-To **add a new structured type** (e.g. a recipe):
+Any `item_type` ending in `_list` is automatically treated as a structured list type — no registration needed. For types that need custom emoji, labels, or per-item field rendering, add an explicit entry to `STRUCTURED_TYPES`. Always use `is_list_type(item_type)` in code rather than checking `STRUCTURED_ITEM_TYPES` directly, so ad-hoc agent-created types (e.g. `movie_list`) render correctly without code changes.
+
+To **add a new structured type** with custom rendering (e.g. a recipe):
 
 1. Add an entry to `STRUCTURED_TYPES`:
 
