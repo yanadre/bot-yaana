@@ -27,7 +27,6 @@ For full documentation see **[DOCS.md](DOCS.md)**.
 app/
 ├── main_telegram_v2.py     Entry point — wires handlers, starts polling
 ├── config.py               Pydantic settings (reads .env)
-├── chat_bot_agent.py       LangGraph agent definition
 ├── agent/
 │   ├── tools.py            Agent tools: add/update/delete/search vault
 │   └── schemas.py          Pydantic schemas for tool inputs
@@ -102,6 +101,14 @@ docker compose up   # applies compose.override.yaml automatically
 ---
 
 ## Changelog
+
+### v0.5 — 2026-05
+- `structure_types.py` is now the single source of truth for all structured types and their per-item fields
+- `make_item()` and `render_item_line()` are fully dynamic — driven by `STRUCTURED_TYPES`, no hardcoded fields
+- System prompt generated at startup from `STRUCTURED_TYPES` via `build_system_prompt()` — schema drift impossible
+- Agent tool descriptions auto-generated from registry via `build_tool_list_hints()`
+- Category filtering UI for task lists: filter buttons appear automatically when items have a `category` field
+- Removed dead `manage_vault` tool; cleaned up imports
 
 ### v0.4 — 2026-05
 - Interactive list UI for shopping, tasks, and any `*_list` type

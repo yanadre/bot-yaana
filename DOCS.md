@@ -145,7 +145,6 @@ Telegram ──► PTB Application ──► Handlers
 app/
 ├── main_telegram_v2.py     Entry point — wires all handlers, starts polling
 ├── config.py               Pydantic settings (reads .env / .env.dev)
-├── chat_bot_agent.py       LangGraph agent definition
 │
 ├── agent/
 │   ├── tools.py            Agent tools: add/update/delete/search vault
@@ -222,6 +221,7 @@ Task list items also support optional fields:
 {
   "text":       "Fix login bug",
   "checked":    false,
+  "category":   "work",
   "priority":   "high",
   "effort":     "small",
   "due_date":   "2026-05-10",
@@ -231,7 +231,8 @@ Task list items also support optional fields:
 ```
 
 **Priority values:** `high` · `medium` · `low`  
-**Effort values:** `small` · `medium` · `large`
+**Effort values:** `small` · `medium` · `large`  
+**Category:** any free-form string (e.g. `work`, `personal`, `shopping`) — used for in-UI filtering
 
 ---
 
@@ -334,14 +335,21 @@ All callbacks go through `handle_callback()` in `app/bot/handlers/callbacks.py`.
 | `list_add_<doc_id>` | Prompt user to type a new item |
 | `list_clear_<doc_id>` | Ask confirmation before removing done items |
 | `list_clear_confirm_<doc_id>` | Execute removal of done items (after confirmation) |
+| `list_catfilter_<doc_id>\|<cat>` | Filter list to a category; empty `<cat>` clears the filter |
 
 ---
 
 ## Structured Types Registry
 
-`app/bot/structure_types.py` is the single source of truth for all complex document types.
+`app/bot/structure_types.py` is the **single source of truth** for all complex document types and their per-item fields. Changing a field here automatically propagates to:
 
-Any `item_type` ending in `_list` is automatically treated as a structured list type — no registration needed. For types that need custom emoji, labels, or per-item field rendering, add an explicit entry to `STRUCTURED_TYPES`. Always use `is_list_type(item_type)` in code rather than checking `STRUCTURED_ITEM_TYPES` directly, so ad-hoc agent-created types (e.g. `movie_list`) render correctly without code changes.
+- `make_item()` — item creation with correct default fields
+- `render_item_line()` — per-item rendering with badges
+- `build_system_prompt()` — the agent's vault structure description (generated at startup)
+- `build_tool_list_hints()` — the `add_to_vault` tool description (generated at import time)
+- The category filter UI — appears automatically for any type that declares a `category` field
+
+Any `item_type` ending in `_list` is automatically treated as a structured list type — no registration needed. For types that need custom emoji, labels, or per-item field rendering, add an explicit entry to `STRUCTURED_TYPES`. Always use `is_list_type(item_type)` in code rather than checking `STRUCTURED_ITEM_TYPES` directly, so ad-hoc agent-created types render correctly without code changes.
 
 To **add a new structured type** with custom rendering (e.g. a recipe):
 
@@ -358,7 +366,9 @@ STRUCTURED_TYPES["recipe"] = {
 2. If the new type needs custom per-item rendering, extend `render_item_line()`.  
 3. Optionally add a `/recipe` command in `list_commands.py` following the same pattern as `/list`.
 
-No changes needed to callbacks, HITL, or the agent — they all read from the registry.
+No changes needed to callbacks, HITL, the agent prompt, or tool descriptions — they all read from the registry automatically.
+
+To **add a category filter** to any list type, simply add `"category"` to its `item_fields`. The filter buttons will appear in the UI automatically once items have that field set.
 
 ---
 
@@ -411,7 +421,7 @@ Changes to any `.py` file under `/app` trigger an automatic restart — no image
 
 - Docker + Docker Compose v2
 - A Telegram bot token (from [@BotFather](https://t.me/BotFather))
-- An OpenAI API key
+- A Google API key (Gemini)
 - A running Qdrant instance (or use the one in `compose.yaml`)
 
 ### Steps
@@ -420,10 +430,14 @@ Changes to any `.py` file under `/app` trigger an automatic restart — no image
 
 ```env
 TELEGRAM_TOKEN=<your token>
-OPENAI_API_KEY=<your key>
+GOOGLE_API_KEY=<your key>
 AUTHORIZED_ID=<your Telegram user ID>
-QDRANT_URL=http://qdrant:6333
+QDRANT_HOST=qdrant
+QDRANT_PORT=6333
 QDRANT_COLLECTION_NAME=documents
+LLM_MODEL=gemini-2.0-flash
+EMBEDDING_MODEL_NAME=gemini-embedding-001
+EMBEDDING_VECTOR_SIZE=3072
 ```
 
 2. Build and start:
@@ -469,7 +483,6 @@ See [Structured Types Registry](#structured-types-registry) above.
 
 1. Define the tool in `app/agent/tools.py`.
 2. Add the corresponding Pydantic schema in `app/agent/schemas.py`.
-3. Register the tool in the agent graph in `app/chat_bot_agent.py`.
-4. Add HITL interrupt handling in `app/bot/hitl.py` if the tool requires user confirmation.
+3. Add HITL interrupt handling in `app/bot/hitl.py` if the tool requires user confirmation.
 
 ---

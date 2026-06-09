@@ -46,11 +46,13 @@ async def save_items(vs, doc_id: str, meta: dict, items: list) -> None:
 # ── Rendering helpers ──────────────────────────────────────────────────────────
 
 def render_list(doc: dict, context: ContextTypes.DEFAULT_TYPE, doc_id: str) -> tuple[str, list]:
-    """Return (html_text, keyboard) respecting stored page/show_done state."""
+    """Return (html_text, keyboard) respecting stored page/show_done/category/edit_mode state."""
     page      = context.user_data.get(f"list_page_{doc_id}", 0)
     show_done = context.user_data.get(f"list_showdone_{doc_id}", False)
-    text      = render_list_text(doc, page=page, show_done=show_done)
-    keyboard  = render_list_keyboard(doc, page=page, show_done=show_done)
+    category  = context.user_data.get(f"list_category_{doc_id}", None)
+    edit_mode = context.user_data.get(f"list_editmode_{doc_id}", False)
+    text      = render_list_text(doc, page=page, show_done=show_done, category=category, edit_mode=edit_mode)
+    keyboard  = render_list_keyboard(doc, page=page, show_done=show_done, category=category, edit_mode=edit_mode)
     return text, keyboard
 
 

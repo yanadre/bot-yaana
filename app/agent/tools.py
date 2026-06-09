@@ -1,11 +1,12 @@
 import asyncio
 import logging
 
-from typing import Literal, Optional, Dict, Any
+from typing import Optional, Dict, Any
 from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
 
 from app.agent.schemas import SearchVaultInput
+from app.bot.structure_types import build_tool_list_hints
 
 logger = logging.getLogger(__name__)
 
@@ -58,18 +59,19 @@ def search_vault(query: str, filter_dict: Optional[Dict[str, Any]] = None, confi
     description=(
         "Add a document to the vector store. "
         "Always extract both the main content and all relevant metadata fields from the user's input. "
-        "The metadata schema is dynamic: infer fields such as item_type, update_date, etc., from the query context. "
+        "The metadata schema is dynamic: infer fields such as item_type, status (e.g. 'to_watch'), etc., from the query context. "
         "Use 'text' for the main content and 'metadata' for all inferred metadata fields. "
         "Examples: "
-        "- For 'Add the book I, Robot', set metadata={'item_type': 'book'} "
-        "- For 'Add a task to wash dishes', set metadata={'item_type': 'task'} "
-        "- For list documents (shopping_list, task_list), use the items[] schema: "
-        "  metadata={'item_type': 'shopping_list', 'name': 'Groceries', 'items': ["
-        "    {'text': 'milk', 'checked': False, 'added_at': '<ISO datetime>', 'checked_at': None}"
-        "  ]} "
-        "- For task_list items, also include: priority ('high'/'medium'/'low'), "
-        "  effort ('small'/'medium'/'large'), due_date ('YYYY-MM-DD', optional). "
-        "- The 'text' field of a list document should be a plain summary: 'Groceries: milk, eggs' "
+        "- For 'Add the book I, Robot to my watch list', set metadata={'item_type': 'book', 'status': 'to_watch'} "
+        "- For 'Add a task to wash dishes', set metadata={'item_type': 'task', 'status': 'to_do'} "
+        "- For list documents, use the items[] schema with item_type ending in '_list'. "
+        "  Known list types and their per-item fields (auto-generated from registry):\n"
+        f"{build_tool_list_hints()}\n"
+        "  The 'text' field of a list document should be a plain summary: 'Movies to Watch: The Godfather, Titanic' "
+        "IMPORTANT: When the user asks to CREATE A LIST from existing documents (e.g. 'create a movie list from my movies'): "
+        "  1. Call search_vault to retrieve the existing documents. "
+        "  2. Call add_to_vault to create a NEW list document, converting each found doc into an items[] entry. "
+        "  3. Do NOT just summarize — actually call add_to_vault with the full items[] array. "
         "IMPORTANT: 'task_list' is a structured list of tasks (has items[]). "
         "'task' is a single standalone task document (no items[]). These are different item_types. "
         "If unsure, attempt to infer likely metadata fields. "
@@ -147,23 +149,6 @@ def update_vault_metadata(filters: Dict[str, Any], new_metadata: Dict[str, Any],
     except Exception as e:
         logger.error(f"[TOOL] update_vault_metadata error: {e}", exc_info=True)
         return f"Error updating metadata: {e}"
-
-
-@tool
-def manage_vault(
-    action: Literal["add", "delete"], 
-    text: Optional[str] = None, 
-    metadata: Optional[Dict[str, Any]] = None,
-    filters: Optional[Dict[str, Any]] = None
-):
-    """
-    Modifies the database.
-    - action 'add': Provide 'text' and a 'metadata' dictionary (extracted from the text).
-    - action 'delete': Provide 'filters' (metadata dict) to identify which docs to remove.
-    """
-    # This tool is intercepted by the Middleware. 
-    # The agent will populate 'metadata' based on your System Prompt instructions.
-    return f"PROPOSAL: {action} requested."
 
 
 tools = [search_vault, add_to_vault, delete_from_vault, update_vault_metadata]
