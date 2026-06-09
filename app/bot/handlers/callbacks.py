@@ -21,9 +21,16 @@ Callback data values and their meaning:
 │ list_open_<doc_id>           │ Open a list document by id (from the picker)                 │
 │ list_toggle_<doc_id>_<idx>   │ Toggle checked state of item at index in a list doc          │
 │ list_page_<doc_id>_<page>    │ Navigate to page in a list doc                               │
-│ list_add_<doc_id>            │ Prompt user to type a new item to append to the list         │
-│ list_clear_<doc_id>          │ Ask confirmation before removing done items          │
-│ list_clear_confirm_<doc_id>  │ Execute removal of done items (after confirmation)   │
+│ list_add_<doc_id>            │ Prompt user to type a new item (or show task form)           │
+│ list_clear_<doc_id>          │ Ask confirmation before removing done items                  │
+│ list_clear_confirm_<doc_id>  │ Execute removal of done items (after confirmation)           │
+│ list_catfilter_<doc_id>|<c>  │ Set category filter to <c>; empty string clears it           │
+│ task_form_p_<doc_id>|…       │ Set priority in new-task form                                │
+│ task_form_e_<doc_id>|…       │ Set effort in new-task form                                  │
+│ task_form_c_<doc_id>|…       │ Set category in new-task form (from existing list)           │
+│ task_form_newcat_<doc_id>    │ Prompt user to type a custom category name                   │
+│ task_form_add_<doc_id>|…     │ Commit new task from form                                    │
+│ task_form_cancel_<doc_id>    │ Cancel new-task form                                         │
 └──────────────────────────────┴──────────────────────────────────────────────────────────────┘
 """
 
@@ -37,14 +44,16 @@ from telegram.ext import ContextTypes
 from app.bot.formatting import format_agent_response
 from app.bot.hitl import build_multi_delete_text, build_multi_delete_keyboard
 from app.bot.list_service import fetch_doc, save_items, render_list, edit_list_message
+from app.bot.lists import render_task_form_text, render_task_form_keyboard
 from app.bot.structure_types import make_item
 from app.bot.update_flow import apply_direct_update, build_update_summary
+from app.bot.session import get_thread_id, touch_session
 
 logger = logging.getLogger("bot")
 
 
-def _agent_config(chat_id: int, vs) -> dict:
-    return {"configurable": {"thread_id": str(chat_id), "vs": vs}}
+def _agent_config(chat_id: int, user_data: dict, vs) -> dict:
+    return {"configurable": {"thread_id": get_thread_id(chat_id, user_data), "vs": vs}}
 
 
 def _reject_command(message: str = "User aborted.") -> Command:
@@ -67,7 +76,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     try:
         vs    = context.bot_data["vs"]
         agent = context.bot_data["agent"]
-        config = _agent_config(chat_id, vs)
+        config = _agent_config(chat_id, context.user_data, vs)
 
         # ── Abort (add flow) ──────────────────────────────────────────────────
         if data == "abort":
@@ -259,6 +268,29 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await edit_list_message(context.bot, query.message.chat_id, query.message.message_id, doc, context, doc_id)
             return
 
+        # ── List: set category filter ─────────────────────────────────────────
+        if data.startswith("list_catfilter_"):
+            # format: list_catfilter_<doc_id>|<idx>  (empty = clear filter, digit = category index)
+            rest     = data[len("list_catfilter_"):]
+            doc_id, _, raw = rest.partition("|")
+            doc = await fetch_doc(vs, doc_id)
+            if not doc:
+                await query.edit_message_text("❌ List not found.")
+                return
+            if raw == "" or not raw.isdigit():
+                # Clear filter
+                category = None
+            else:
+                # Resolve index to category name using the same sorted list as the keyboard
+                all_items  = doc.get("metadata", {}).get("items", [])
+                categories = sorted({i.get("category", "") for i in all_items if i.get("category")})
+                idx = int(raw)
+                category = categories[idx] if idx < len(categories) else None
+            context.user_data[f"list_category_{doc_id}"] = category
+            context.user_data[f"list_page_{doc_id}"]     = 0       # reset page on filter change
+            await edit_list_message(context.bot, query.message.chat_id, query.message.message_id, doc, context, doc_id)
+            return
+
         # ── List: open from picker ────────────────────────────────────────────
         if data.startswith("list_open_"):
             doc_id = data[len("list_open_"):]
@@ -309,16 +341,229 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await edit_list_message(context.bot, query.message.chat_id, query.message.message_id, doc, context, doc_id)
             return
 
-        # ── List: prompt to add a new item ────────────────────────────────────
+        # ── List: toggle edit mode ────────────────────────────────────────────
+        if data.startswith("list_editmode_"):
+            parts   = data.split("_")
+            active  = parts[-1] == "1"
+            doc_id  = "_".join(parts[2:-1])
+            context.user_data[f"list_editmode_{doc_id}"] = active
+            doc = await fetch_doc(vs, doc_id)
+            if not doc:
+                await query.edit_message_text("❌ List not found.")
+                return
+            await edit_list_message(context.bot, query.message.chat_id, query.message.message_id, doc, context, doc_id)
+            return
+
+        # ── List: delete a single item ────────────────────────────────────────
+        if data.startswith("list_item_del_"):
+            parts  = data.split("_")
+            idx    = int(parts[-1])
+            doc_id = "_".join(parts[3:-1])
+            doc = await fetch_doc(vs, doc_id)
+            if not doc:
+                await query.edit_message_text("❌ List not found.")
+                return
+            meta  = doc.get("metadata", {})
+            items = list(meta.get("items", []))
+            if idx >= len(items):
+                await query.answer("⚠️ Item not found.", show_alert=True)
+                return
+            items.pop(idx)
+            await save_items(vs, doc_id, meta, items)
+            doc = await fetch_doc(vs, doc_id) or doc
+            await edit_list_message(context.bot, query.message.chat_id, query.message.message_id, doc, context, doc_id)
+            return
+
+        # ── List: prompt to edit a single item's text ─────────────────────────
+        if data.startswith("list_item_edit_"):
+            parts  = data.split("_")
+            idx    = int(parts[-1])
+            doc_id = "_".join(parts[3:-1])
+            context.user_data["pending_list_item_edit_doc_id"]     = doc_id
+            context.user_data["pending_list_item_edit_idx"]        = idx
+            context.user_data["pending_list_item_edit_message_id"] = query.message.message_id
+            doc = await fetch_doc(vs, doc_id)
+            old_text = ""
+            if doc:
+                items    = doc.get("metadata", {}).get("items", [])
+                old_text = items[idx].get("text", "") if idx < len(items) else ""
+            prompt = await query.message.reply_text(
+                f"✏️ Send the new text for this item:\n<i>Current: {old_text}</i>",
+                parse_mode="HTML",
+            )
+            context.user_data["pending_list_item_edit_prompt_id"] = prompt.message_id
+            return
+
+        # ── List: prompt to rename ────────────────────────────────────────────
+        if data.startswith("list_rename_"):
+            doc_id = data[len("list_rename_"):]
+            context.user_data["pending_list_rename_doc_id"]     = doc_id
+            context.user_data["pending_list_rename_message_id"] = query.message.message_id
+            prompt = await query.message.reply_text("✏️ Send me the new name for this list:")
+            context.user_data["pending_list_rename_prompt_id"]  = prompt.message_id
+            return
+
+        # ── List: prompt to add a new item (or show task form) ───────────────
         if data.startswith("list_add_"):
             doc_id = data[len("list_add_"):]
-            context.user_data["pending_list_add_doc_id"]     = doc_id
-            context.user_data["pending_list_add_message_id"] = query.message.message_id
-            await query.message.reply_text(
-                "✏️ Send me the item you'd like to add:\n"
-                "<i>(for tasks you can include priority/effort, "
-                'e.g. "Fix login bug | high | small")</i>',
+            doc    = await fetch_doc(vs, doc_id)
+            item_type = doc.get("metadata", {}).get("item_type", "") if doc else ""
+
+            if item_type == "task_list":
+                # Task list → prompt for name first, then show the form
+                context.user_data["pending_list_add_doc_id"]     = doc_id
+                context.user_data["pending_list_add_message_id"] = query.message.message_id
+                context.user_data["pending_task_form_mode"]      = True
+                prompt = await query.message.reply_text("✏️ Send me the task name:")
+                context.user_data["pending_list_add_prompt_id"]  = prompt.message_id
+            else:
+                # Other list types → simple text prompt
+                context.user_data["pending_list_add_doc_id"]     = doc_id
+                context.user_data["pending_list_add_message_id"] = query.message.message_id
+                prompt = await query.message.reply_text(
+                    "✏️ Send me the item you'd like to add:",
+                    parse_mode="HTML",
+                )
+                context.user_data["pending_list_add_prompt_id"] = prompt.message_id
+            return
+
+        # ── Task form: field toggle (priority / effort / category) ────────────
+        if (data.startswith("task_form_p_") or
+                data.startswith("task_form_e_") or
+                data.startswith("task_form_c_")):
+            # format: task_form_<field>_<doc_id>|<new_value>
+            field    = data[10]          # 'p', 'e', or 'c'
+            rest     = data[12:]         # after "task_form_X_"
+            doc_id, _, new_val = rest.partition("|")
+
+            # Read current form state from user_data
+            form = context.user_data.get(f"task_form_{doc_id}", {})
+            if field == "p": form["priority"] = new_val or None
+            if field == "e": form["effort"]   = new_val or None
+            if field == "c":
+                if new_val in ("", "x"):
+                    # deselect
+                    form["category"] = None
+                elif new_val.isdigit():
+                    # resolve index to category name
+                    cats = form.get("existing_cats", [])
+                    idx  = int(new_val)
+                    form["category"] = cats[idx] if idx < len(cats) else None
+                else:
+                    form["category"] = new_val or None
+            context.user_data[f"task_form_{doc_id}"] = form
+
+            task_name = form.get("task_name", "")
+            priority  = form.get("priority")
+            effort    = form.get("effort")
+            category  = form.get("category")
+            existing_cats = form.get("existing_cats", [])
+
+            # If for some reason it's missing, fall back to fetching from the doc
+            if not existing_cats:
+                doc = await fetch_doc(vs, doc_id)
+                existing_cats = sorted({i.get("category", "") for i in doc.get("metadata", {}).get("items", []) if i.get("category")}) if doc else []
+                form["existing_cats"] = existing_cats
+                context.user_data[f"task_form_{doc_id}"] = form
+
+            text     = render_task_form_text(task_name, priority, effort, category)
+            keyboard = render_task_form_keyboard(doc_id, task_name, priority, effort, category, existing_cats)
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+            return
+
+        # ── Task form: commit ─────────────────────────────────────────────────
+        if data.startswith("task_form_add_"):
+            doc_id = data[len("task_form_add_"):]
+            form   = context.user_data.pop(f"task_form_{doc_id}", {})
+
+            task_name = form.get("task_name", "")
+            priority  = form.get("priority")
+            effort    = form.get("effort")
+            category  = form.get("category")
+
+            doc = await fetch_doc(vs, doc_id)
+            if not doc:
+                await query.edit_message_text("❌ List not found.")
+                return
+
+            meta  = doc.get("metadata", {})
+            items = list(meta.get("items", []))
+            new_item = make_item(task_name, item_type="task_list",
+                                 priority=priority, effort=effort, category=category)
+            items.append(new_item)
+            await save_items(vs, doc_id, meta, items)
+
+            doc = await fetch_doc(vs, doc_id) or doc
+
+            # Delete the task-form message, then send the list UI as a fresh message
+            try:
+                await query.message.delete()
+            except Exception as e:
+                logger.warning(f"[callback] could not delete task form message: {e}")
+
+            text, keyboard = render_list(doc, context, doc_id)
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=text,
                 parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
+
+        # ── Task form: cancel ─────────────────────────────────────────────────
+        if data.startswith("task_form_cancel_"):
+            doc_id = data[len("task_form_cancel_"):]
+            context.user_data.pop(f"task_form_{doc_id}", None)
+            doc = await fetch_doc(vs, doc_id)
+            if doc:
+                await edit_list_message(context.bot, query.message.chat_id, query.message.message_id, doc, context, doc_id)
+            else:
+                await query.edit_message_text("❌ Cancelled.")
+            return
+
+        # ── Task form: prompt for custom category ─────────────────────────────
+        if data.startswith("task_form_newcat_"):
+            doc_id = data[len("task_form_newcat_"):]
+            context.user_data["pending_task_form_newcat_doc_id"]     = doc_id
+            context.user_data["pending_task_form_newcat_message_id"] = query.message.message_id
+            prompt = await query.message.reply_text("🏷 Send me the category name:")
+            context.user_data["pending_task_form_newcat_prompt_id"]  = prompt.message_id
+            return
+
+        # ── List: change type — show type picker ──────────────────────────────
+        if data.startswith("list_settype_confirm_"):
+            # format: list_settype_confirm_<doc_id>|<new_type>
+            rest   = data[len("list_settype_confirm_"):]
+            doc_id, _, new_type = rest.partition("|")
+            doc = await fetch_doc(vs, doc_id)
+            if not doc:
+                await query.edit_message_text("❌ List not found.")
+                return
+            meta = doc.get("metadata", {})
+            await vs.update_document(
+                filter_dict={"id": doc_id},
+                new_metadata={"item_type": new_type},
+            )
+            doc = await fetch_doc(vs, doc_id) or doc
+            await edit_list_message(context.bot, query.message.chat_id, query.message.message_id, doc, context, doc_id)
+            return
+
+        if data.startswith("list_settype_"):
+            doc_id      = data[len("list_settype_"):]
+            current_doc = await fetch_doc(vs, doc_id)
+            current_type = (current_doc or {}).get("metadata", {}).get("item_type", "")
+            buttons = []
+            for type_key, info in STRUCTURED_TYPES.items():
+                mark  = "✦ " if type_key == current_type else ""
+                label = f"{mark}{info['emoji']} {info['label']}"
+                buttons.append([InlineKeyboardButton(
+                    label,
+                    callback_data=f"list_settype_confirm_{doc_id}|{type_key}",
+                )])
+            buttons.append([InlineKeyboardButton("❌ Cancel", callback_data=f"list_open_{doc_id}")])
+            await query.edit_message_text(
+                "🔄 Choose a new type for this list:",
+                reply_markup=InlineKeyboardMarkup(buttons),
             )
             return
 

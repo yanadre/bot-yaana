@@ -294,6 +294,32 @@ class QdrantStore:
         )
         logger.info(f"[QDRANT] delete completed for filter_dict={filter_dict}")
 
+    async def clear_all(self) -> int:
+        """
+        Deletes every document in the collection by recreating it from scratch.
+        Returns the number of points that were deleted.
+        """
+        if not self.sync_client:
+            raise ValueError("Sync client not initialized")
+        info = self.sync_client.get_collection(self.collection_name)
+        count = info.points_count or 0
+        self.sync_client.delete_collection(self.collection_name)
+        self.sync_client.create_collection(
+            collection_name=self.collection_name,
+            vectors_config=models.VectorParams(
+                size=self.embedding_model.vector_size,
+                distance=models.Distance.COSINE,
+            ),
+        )
+        # Re-initialise the LangChain wrapper against the fresh collection
+        self.vector_store = QdrantVectorStore(
+            client=self.sync_client,
+            collection_name=self.collection_name,
+            embedding=self.embedding_model,
+        )
+        logger.info(f"[QDRANT] clear_all: deleted {count} point(s), collection recreated.")
+        return count
+
     async def close(self):
         if self.sync_client:
             self.sync_client.close()
