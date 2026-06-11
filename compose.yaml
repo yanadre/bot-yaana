@@ -8,7 +8,7 @@ services:
       - qdrant_data:/qdrant/storage
 
   api:
-    platform: linux/arm64   
+    # platform: linux/arm64   
 
     build: 
       context: .
@@ -20,6 +20,7 @@ services:
       - qdrant
     env_file:
       - .env
+    restart: unless-stopped
     volumes:
       - ./logs:/app/logs
 
